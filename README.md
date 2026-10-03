@@ -16,8 +16,9 @@ Unlike regular shop software, this is built for rentals. When you bill a custome
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/K-Sid-x/Events_Billing_software.git
+  git clone [https://github.com/K-Sid-x/Events_Billing_software.git](https://github.com/K-Sid-x/Events_Billing_software.git)
 
+   ` ``` `
    ## 🛠️ Community TODOs (How You Can Help!)
 This project solves a massive problem for the event industry, but there is always room to grow. Feel free to fork the repo and submit a Pull Request!
 
