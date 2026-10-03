@@ -18,3 +18,9 @@ Unlike regular shop software, this is built for rentals. When you bill a custome
    ```bash
    git clone [https://github.com/K-Sid-x/Ledger-Events-Rental-ERP.git](https://github.com/K-Sid-x/Ledger-Events-Rental-ERP.git)
    cd Ledger-Events-Rental-ERP
+
+   ## 🛠️ Community TODOs (How You Can Help!)
+This project solves a massive problem for the event industry, but there is always room to grow. Feel free to fork the repo and submit a Pull Request!
+
+* **[Database] PostgreSQL Migration:** Build a cloud PostgreSQL connection for multi-warehouse syncing.
+* **[Integrations] WhatsApp API:** Connect the Print Studio to a WhatsApp API to send PDF bills directly to clients.
