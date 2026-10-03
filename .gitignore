@@ -1,0 +1,21 @@
+# Ignore Database & Backups
+*.db
+Backups/
+
+# Ignore User Uploads & Media Vaults
+Vault/
+user_avatars/
+company_logos/
+expense_receipts/
+purchase_payment_receipts/
+invoice_payment_receipts/
+vendor_bills/
+Employees/
+Labours/
+
+# Ignore Python Caches & IDE Settings
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+settings.json
