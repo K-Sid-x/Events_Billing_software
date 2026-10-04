@@ -1273,7 +1273,10 @@ def open_leave_allocation_dialog(parent, emp_id, emp_name, current_year, refresh
 
     tk.Label(pop, text="Target Year:", font=("Arial", 9, "bold"), bg=t["bg"], fg=t["sec"]).pack(anchor="w", padx=20, pady=(5, 2))
     year_var = tk.StringVar(value=str(current_year))
-    year_cb = ttk.Combobox(pop, textvariable=year_var, values=[str(y) for y in range(2020, 2035)], state="readonly", font=("Arial", 11))
+    
+    # Dynamically generate years from 2020 up to exactly 1 upcoming year
+    max_year = int(current_year) + 2 
+    year_cb = ttk.Combobox(pop, textvariable=year_var, values=[str(y) for y in range(2020, max_year)], state="readonly", font=("Arial", 11))
     year_cb.pack(fill="x", padx=20, ipady=4)
 
     tk.Label(pop, text="Total Days Allotted:", font=("Arial", 9, "bold"), bg=t["bg"], fg=t["sec"]).pack(anchor="w", padx=20, pady=(15, 2))

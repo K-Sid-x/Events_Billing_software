@@ -867,12 +867,29 @@ def open_employee_ledger(parent, emp_id, curr_fmt, date_fmt_code, refresh_main_c
         alloc_dict = {}
         try: alloc_dict = json.loads(emp.get('docs_json', '{}')).get("leave_allocations", {})
         except: pass
-        allocated_leaves = float(alloc_dict.get(str(target_year), 0.0))
+        base_allocated = float(alloc_dict.get(str(target_year), 0.0))
+        
+        # --- PRO-RATA LEAVE CALCULATION ---
+        if jd.year == target_year:
+            # If they joined this exact year, calculate active months (e.g., Aug to Dec = 5 months)
+            months_active = 12 - jd.month + 1
+            allocated_leaves = (base_allocated / 12) * months_active
+        elif jd.year > target_year:
+            # If they hadn't even joined yet in the target year
+            allocated_leaves = 0.0
+        else:
+            # If they joined in a previous year, they get the full baseline
+            allocated_leaves = base_allocated
+        # ----------------------------------
         
         used_leaves = sum(1 for d, p in normalized_pays if p[2] == 'Paid Leave' and d != datetime.min and d.year == target_year)
         rem_leaves = allocated_leaves - used_leaves
         
-        lbl_leaves.config(text=f"Paid Leaves ({target_year}): {allocated_leaves:g} Allotted  |  {used_leaves} Used  |  Remaining: {rem_leaves:g}")
+        # Ensure it formats cleanly without crazy decimals (e.g. 15 instead of 15.0)
+        if allocated_leaves.is_integer(): allocated_leaves = int(allocated_leaves)
+        if rem_leaves.is_integer(): rem_leaves = int(rem_leaves)
+        
+        lbl_leaves.config(text=f"Paid Leaves ({target_year}): {allocated_leaves} Allotted  |  {used_leaves} Used  |  Remaining: {rem_leaves}")
         if rem_leaves < 0: lbl_leaves.config(fg=ACCENT_RED)
         else: lbl_leaves.config(fg=ACCENT_BLUE)
         # -------------------------------------------------------------
