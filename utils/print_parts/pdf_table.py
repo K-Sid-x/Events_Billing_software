@@ -62,27 +62,18 @@ def build_table(ctx, get_css, page_items, pg_num, running_total):
         
         # --- THE FIX: Line-by-Line HTML Rendering ---
         raw_name = str(it.get("name", ""))
-        html_lines = []
-        for line in raw_name.split('\n'):
-            l_b = "@@B@@" in line
-            l_u = "@@U@@" in line
-            c_line = line.replace("@@B@@", "").replace("@@U@@", "")
-            
-            # 1. Convert consecutive spaces (2, 3, or 4+) into HTML non-breaking spaces
-            c_line = c_line.replace("    ", "&nbsp;&nbsp;&nbsp;&nbsp;").replace("   ", "&nbsp;&nbsp;&nbsp;").replace("  ", "&nbsp;&nbsp;")
-            
-            f_w = "font-weight: bold;" if l_b else ""
-            t_d = "text-decoration: underline; text-underline-offset: 3px; text-decoration-skip-ink: none;" if l_u else ""
-            
-            if f_w or t_d:
-                # 2. Break the underline formatting ONLY on the huge gaps! 
-                # Single spaces (like "Total (sq.ft)") will stay underlined as one continuous block.
-                safe_line = c_line.replace("&nbsp;", f'</span>&nbsp;<span style="{f_w} {t_d}">')
-                html_lines.append(f'<span style="{f_w} {t_d}">{safe_line}</span>')
-            else:
-                html_lines.append(c_line)
-                
-        final_name_html = "<br>".join(html_lines)
+        
+        # Convert true inline tags to HTML
+        html_name = raw_name.replace("@@B@@", "[B]").replace("@@U@@", "[U]") 
+        if "[B]" in html_name and "[/B]" not in html_name: html_name += "[/B]"
+        if "[U]" in html_name and "[/U]" not in html_name: html_name += "[/U]"
+        
+        html_name = html_name.replace("[B]", "<span style='font-weight: bold;'>").replace("[/B]", "</span>")
+        html_name = html_name.replace("[U]", "<span style='text-decoration: underline; text-underline-offset: 3px; text-decoration-skip-ink: none;'>").replace("[/U]", "</span>")
+        
+        # Force HTML to render huge gaps perfectly
+        html_name = html_name.replace('\n', '<br>').replace("  ", "&nbsp;&nbsp;")
+        final_name_html = html_name
         # --------------------------------------------
 
         sl_val = str(item.get("idx", it.get("sl", ""))).strip()

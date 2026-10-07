@@ -224,18 +224,21 @@ def draw_table(ctx):
 
         top_y = st["cy"] + s(3) 
         
-        # --- THE FIX: Line-by-Line Canvas Drawing ---
+        # --- THE FIX: Line-by-Line Canvas Drawing (Strips Inline Tags) ---
         curr_y = top_y
+        import re
         for line in raw_name.split('\n'):
-            l_b = "@@B@@" in line
-            l_u = "@@U@@" in line
+            l_b = "@@B@@" in line or "[B]" in line
+            l_u = "@@U@@" in line or "[U]" in line
+            
             c_line = line.replace("@@B@@", "").replace("@@U@@", "")
+            c_line = re.sub(r'\[/?(B|U)\]', '', c_line)
             
             if c_line.strip() == "":
                 curr_y += s(15) 
             else:
                 curr_y = c_txt(cxs[2] + s(5), curr_y, c_line, "tr_part", width=int((cxs[3]-cxs[2])-s(10)), max_w=(cxs[3]-cxs[2])-s(10), bold=l_b, underline=l_u)
-        # --------------------------------------------
+        # -----------------------------------------------------------------
         
         c_txt(cxs[0] + (cxs[1]-cxs[0])/2, top_y, sl_val, "tr_slno", anchor="n", max_w=(cxs[1]-cxs[0])-s(4))
         c_txt(cxs[1] + (cxs[2]-cxs[1])/2, top_y, qty_val, "tr_qty", anchor="n", max_w=(cxs[2]-cxs[1])-s(4))
