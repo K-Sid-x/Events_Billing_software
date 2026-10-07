@@ -398,8 +398,83 @@ def open_partial_payment_dialog(portal, parent_popup, bill_data, refresh_cb, ven
     adv_info_var = tk.StringVar()
     adv_info_lbl = tk.Label(form_f, textvariable=adv_info_var, bg=t["bg"], font=("Segoe UI", 10, "bold"))
 
+    try:
+        conn = database.get_connection()
+        c = conn.cursor()
+        c.execute("SELECT subtotal FROM purchases WHERE id=?", (b_id,))
+        res_sub = c.fetchone()
+        conn.close()
+        bill_subtotal = float(res_sub[0] or 0.0) if res_sub else tot
+    except: bill_subtotal = tot
+
+    # --- THE FIX: SMART TDS UI WITH PERCENTAGE AUTO-FILL FOR SINGLE PAYMENT ---
+    tds_f = tk.Frame(form_f, bg=t["bg"])
+    tds_f.grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 5))
+    
+    tds_var = tk.BooleanVar(value=False)
+    tds_chk = tk.Checkbutton(tds_f, text="We Deducted TDS", variable=tds_var, bg=t["bg"], fg=t["accent_blue"], selectcolor=t["bg"], activebackground=t["bg"], activeforeground=t["accent_blue"], font=("Segoe UI", 10, "bold"), cursor="hand2")
+    tds_chk.pack(side="left")
+    
+    tds_rate_var = tk.StringVar(value="1%")
+    tds_rate_cb = ttk.Combobox(tds_f, textvariable=tds_rate_var, values=["Auto Balance", "1%", "2%", "5%", "10%", "Custom"], state="readonly", width=12, style="Portal.TCombobox")
+    
+    tds_amt_var = tk.StringVar(value="0")
+    tds_ent = tk.Entry(tds_f, textvariable=tds_amt_var, font=("Segoe UI", 11, "bold"), bg=t["card"], fg=t["text"], insertbackground=t["text"], highlightbackground=t["border"], highlightcolor=t["accent_blue"], highlightthickness=1, bd=0, relief="flat", width=12)
+    
+    _is_auto_updating = [False]
+    def on_tds_manual_edit(*args):
+        if not _is_auto_updating[0] and tds_var.get():
+            tds_rate_var.set("Custom")
+            
+    tds_amt_var.trace_add("write", on_tds_manual_edit)
+    tds_rate_var.trace_add("write", lambda *a: check_amount())
+    
+    def toggle_tds(*args):
+        if tds_var.get():
+            tds_rate_cb.pack(side="left", padx=(10, 5), ipady=2)
+            tds_ent.pack(side="left", padx=5, ipady=3)
+        else:
+            tds_rate_cb.pack_forget()
+            tds_ent.pack_forget()
+            _is_auto_updating[0] = True
+            tds_amt_var.set("0")
+            _is_auto_updating[0] = False
+            tds_rate_var.set("1%")
+        check_amount()
+        
+    tds_var.trace_add("write", toggle_tds)
+    # --------------------------------------------
+
     def check_amount(*args):
         amt = parse_eu_num(pay_var.get())
+        
+        # --- SMART TDS AUTO-FILL ---
+        if tds_var.get() and not _is_auto_updating[0]:
+            rate_val = tds_rate_var.get()
+            calc_tds = None
+            if rate_val == "Auto Balance":
+                calc_tds = max(0.0, actual_bal - amt)
+            elif rate_val.endswith("%"):
+                pct = float(rate_val.replace("%", "")) / 100.0
+                calc_tds = int((bill_subtotal * pct) + 0.5)
+                
+            if calc_tds is not None:
+                current_tds_val = parse_eu_num(tds_amt_var.get())
+                if abs(current_tds_val - calc_tds) > 0.001:
+                    _is_auto_updating[0] = True
+                    tds_amt_var.set(f"{calc_tds:.2f}")
+                    if rate_val.endswith("%"):
+                        new_amt = max(0.0, actual_bal - calc_tds)
+                        pay_var.set(f"{new_amt:.2f}")
+                        amt = new_amt
+                    _is_auto_updating[0] = False
+        # ---------------------------
+        
+        try: tds_amt = parse_eu_num(tds_amt_var.get()) if tds_var.get() else 0.0
+        except: tds_amt = 0.0
+        
+        eff_amt = amt + tds_amt
+        tds_chk.config(text="We Deducted TDS")
         
         waive_chk.grid_forget()
         adv_info_lbl.grid_forget()
@@ -411,48 +486,56 @@ def open_partial_payment_dialog(portal, parent_popup, bill_data, refresh_cb, ven
                 waive_var.set(False)
                 adv_info_var.set(f"⚠️ Exceeds Available Wallet Balance!")
                 adv_info_lbl.config(fg=t["error"])
-                adv_info_lbl.grid(row=5, column=1, columnspan=2, sticky="w", pady=(5, 0))
-                pay_pop.geometry(f"{pop_w}x{pop_h + 30}")
-            elif amt > actual_bal:
+                adv_info_lbl.grid(row=7, column=0, columnspan=3, sticky="w", pady=(5, 0))
+                pay_pop.geometry(f"{pop_w}x{pop_h + 60}")
+            elif eff_amt > actual_bal:
                 waive_var.set(False)
-                adv_info_var.set(f"⚠️ Cannot overpay bill using Wallet.")
+                adv_info_var.set(f"⚠️ Cannot overpay bill using Wallet/TDS.")
                 adv_info_lbl.config(fg=t["error"])
-                adv_info_lbl.grid(row=5, column=1, columnspan=2, sticky="w", pady=(5, 0))
-                pay_pop.geometry(f"{pop_w}x{pop_h + 30}")
-            elif 0 <= amt < actual_bal:
-                diff = actual_bal - amt
+                adv_info_lbl.grid(row=7, column=0, columnspan=3, sticky="w", pady=(5, 0))
+                pay_pop.geometry(f"{pop_w}x{pop_h + 60}")
+            elif 0 <= eff_amt < actual_bal:
+                diff = actual_bal - eff_amt
                 waive_chk.config(text=f"Waive remaining {format_currency(diff, curr_format)} (Write-Off)")
-                waive_chk.grid(row=5, column=1, columnspan=2, sticky="w", pady=(5, 0))
-                pay_pop.geometry(f"{pop_w}x{pop_h + 30}")
+                waive_chk.grid(row=7, column=0, columnspan=3, sticky="w", pady=(5, 0))
+                pay_pop.geometry(f"{pop_w}x{pop_h + 60}")
             else:
                 waive_var.set(False)
-                pay_pop.geometry(f"{pop_w}x{pop_h}")
-        else:
-            if 0 <= amt < actual_bal:
-                diff = actual_bal - amt
-                waive_chk.config(text=f"Waive remaining {format_currency(diff, curr_format)} (Write-Off)")
-                waive_chk.grid(row=5, column=1, columnspan=2, sticky="w", pady=(5, 0))
                 pay_pop.geometry(f"{pop_w}x{pop_h + 30}")
-            elif amt > actual_bal:
+        else:
+            if 0 <= eff_amt < actual_bal:
+                diff = actual_bal - eff_amt
+                waive_chk.config(text=f"Waive remaining {format_currency(diff, curr_format)} (Write-Off)")
+                waive_chk.grid(row=7, column=0, columnspan=3, sticky="w", pady=(5, 0))
+                pay_pop.geometry(f"{pop_w}x{pop_h + 60}")
+            elif eff_amt > actual_bal:
                 waive_var.set(False)
-                diff = amt - actual_bal
+                diff = eff_amt - actual_bal
                 adv_info_var.set(f"To Advance Wallet: {format_currency(diff, curr_format)}")
                 adv_info_lbl.config(fg=t["accent_green"])
-                adv_info_lbl.grid(row=5, column=1, columnspan=2, sticky="w", pady=(5, 0))
-                pay_pop.geometry(f"{pop_w}x{pop_h + 30}")
+                adv_info_lbl.grid(row=7, column=0, columnspan=3, sticky="w", pady=(5, 0))
+                pay_pop.geometry(f"{pop_w}x{pop_h + 60}")
             else:
                 waive_var.set(False)
-                pay_pop.geometry(f"{pop_w}x{pop_h}")
+                pay_pop.geometry(f"{pop_w}x{pop_h + 30}")
 
     pay_var.trace_add("write", check_amount)
     mode_var.trace_add("write", check_amount)
+    tds_amt_var.trace_add("write", check_amount)
     check_amount()
 
     def save_payment():
         import shutil
         import time
+        import re
+        
         amt = parse_eu_num(pay_var.get())
+        tds_amt = parse_eu_num(tds_amt_var.get()) if tds_var.get() else 0.0
+        
         actual_payment = min(actual_bal, amt)
+        remaining_after_cash = max(0.0, actual_bal - actual_payment)
+        
+        actual_tds = min(remaining_after_cash, tds_amt)
         overpayment = amt - actual_payment if amt > actual_bal else 0.0
         
         is_wallet = "Wallet Deduction" in mode_var.get()
@@ -466,14 +549,14 @@ def open_partial_payment_dialog(portal, parent_popup, bill_data, refresh_cb, ven
             return
             
         is_waive = waive_var.get()
-        woff_amt = max(0.0, actual_bal - actual_payment) if is_waive else 0.0
+        woff_amt = max(0.0, actual_bal - actual_payment - actual_tds) if is_waive else 0.0
         
-        if actual_payment <= 0 and woff_amt <= 0 and overpayment <= 0: return
+        if actual_payment <= 0 and actual_tds <= 0 and woff_amt <= 0 and overpayment <= 0: return
 
         clean_mode = "Wallet Deduction" if is_wallet else mode_var.get().split(" (")[0].strip()
         amt_sign = -1 
 
-        new_paid = paid + actual_payment
+        new_paid = paid + actual_payment + actual_tds
         new_woff = woff + woff_amt
         new_bal = max(0.0, tot - new_paid - new_woff)
         new_status = 'Paid' if new_bal <= 0.01 else 'Partial'
@@ -540,6 +623,15 @@ def open_partial_payment_dialog(portal, parent_popup, bill_data, refresh_cb, ven
                 inserted_ids.append(nid)
                 c.execute("SELECT id, company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes, attachment_path FROM party_payments WHERE id=?", (nid,))
                 inserted_rows.append(c.fetchone())
+                
+            if actual_tds > 0:
+                tds_ref = f"{b_num} ({actual_tds})"
+                c.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes, attachment_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                          (comp_id, vendor_name, vend_id, 'make', db_date, actual_tds * amt_sign, "TDS Deduction", tds_ref, "TDS Deducted by Us", ""))
+                nid = c.lastrowid
+                inserted_ids.append(nid)
+                c.execute("SELECT id, company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes, attachment_path FROM party_payments WHERE id=?", (nid,))
+                inserted_rows.append(c.fetchone())
             
             if woff_amt > 0:
                 woff_ref = f"{b_num} ({woff_amt})"
@@ -587,6 +679,48 @@ def open_partial_payment_dialog(portal, parent_popup, bill_data, refresh_cb, ven
     tk.Button(pay_pop, text="Confirm Payment", font=("Segoe UI", 11, "bold"), bg=t["accent_blue"], fg="#ffffff", relief="flat", cursor="hand2", command=save_payment).pack(fill="x", padx=30, pady=(10, 20))
 
 
+def compute_proportional_allocations(selected_bills_set, raw_balances_dict, cash_total, tds_total, is_waive_enabled, raw_subtotals_dict=None):
+    selected_list = [b_id for b_id in raw_balances_dict.keys() if b_id in selected_bills_set]
+    
+    weight_dict = raw_subtotals_dict if raw_subtotals_dict else raw_balances_dict
+    total_weight = sum(weight_dict.get(b_id, 0.0) for b_id in selected_list)
+    
+    res = {}
+    for b_id in raw_balances_dict.keys():
+        res[str(b_id)] = {"cash": 0.0, "tds": 0.0, "woff": 0.0, "total": 0.0}
+        
+    if not selected_list: return res
+        
+    rem_cash = cash_total
+    for idx, b_id in enumerate(selected_list):
+        w = weight_dict.get(b_id, 0.0)
+        fraction = w / total_weight if total_weight > 0 else 0.0
+        
+        if idx == len(selected_list) - 1:
+            alloc_t = max(0.0, tds_total - sum(res[str(k)]["tds"] for k in selected_list[:-1]))
+        else:
+            alloc_t = round(tds_total * fraction, 2)
+            
+        res[str(b_id)]["tds"] = alloc_t
+        
+    for b_id in selected_list:
+        bal = raw_balances_dict[b_id]
+        alloc_t = res[str(b_id)]["tds"]
+        
+        needed_cash = max(0.0, bal - alloc_t)
+        alloc_c = min(needed_cash, rem_cash)
+        rem_cash -= alloc_c
+        res[str(b_id)]["cash"] = alloc_c
+        
+        alloc_w = 0.0
+        if is_waive_enabled:
+            alloc_w = max(0.0, bal - alloc_c - alloc_t)
+            
+        res[str(b_id)]["woff"] = alloc_w
+        res[str(b_id)]["total"] = alloc_c + alloc_t + alloc_w
+        
+    return res
+
 def open_auto_payment_dialog(portal, parent_popup, vendor_name, refresh_cb, undo_cb=None):
     t = portal.colors
     comp_id = portal.comp_id
@@ -596,21 +730,24 @@ def open_auto_payment_dialog(portal, parent_popup, vendor_name, refresh_cb, undo
     conn = database.get_connection()
     c = conn.cursor()
     if portal_vid:
-        c.execute("SELECT id, purchase_date, bill_number, total, amount_paid, balance_due, write_off, status FROM purchases WHERE vendor_id=? AND company_id=? AND is_deleted=0 AND is_draft=0 ORDER BY purchase_date ASC", (portal_vid, comp_id))
+        c.execute("SELECT id, purchase_date, bill_number, total, amount_paid, balance_due, write_off, status, subtotal FROM purchases WHERE vendor_id=? AND company_id=? AND is_deleted=0 AND is_draft=0 ORDER BY purchase_date ASC", (portal_vid, comp_id))
     else:
-        c.execute("SELECT id, purchase_date, bill_number, total, amount_paid, balance_due, write_off, status FROM purchases WHERE vendor_name=? AND company_id=? AND is_deleted=0 AND is_draft=0 ORDER BY purchase_date ASC", (vendor_name, comp_id))
+        c.execute("SELECT id, purchase_date, bill_number, total, amount_paid, balance_due, write_off, status, subtotal FROM purchases WHERE vendor_name=? AND company_id=? AND is_deleted=0 AND is_draft=0 ORDER BY purchase_date ASC", (vendor_name, comp_id))
     raw_unpaid = c.fetchall()
     conn.close()
     
     unpaid = []
     raw_balances = {}
+    raw_subtotals = {}
     for r in raw_unpaid:
-        b_id, p_date, b_num, tot, paid_so_far, bal_due, woff, stat = r
+        b_id, p_date, b_num, tot, paid_so_far, bal_due, woff, stat = r[:8]
+        sub = float(r[8] or 0.0) if len(r) > 8 else float(tot or 0.0)
         woff = woff if woff else 0.0
-        actual_due = max(0.0, tot - paid_so_far - woff)
+        actual_due = max(0.0, float(tot or 0.0) - float(paid_so_far or 0.0) - woff)
         if actual_due > 0.01:
-            unpaid.append(r)
+            unpaid.append((b_id, p_date, b_num, tot, paid_so_far, bal_due, woff, stat))
             raw_balances[str(b_id)] = actual_due
+            raw_subtotals[str(b_id)] = sub
             
     if not unpaid:
         messagebox.showinfo("Done", "No unpaid bills found for this vendor.", parent=parent_popup)
@@ -728,6 +865,47 @@ def open_auto_payment_dialog(portal, parent_popup, vendor_name, refresh_cb, undo
 
     tk.Label(form_f, textvariable=unallocated_var, font=("Segoe UI", 10, "bold"), bg=t["bg"], fg=t["error"]).grid(row=2, column=3, columnspan=2, sticky="w", pady=5)
 
+    # --- THE FIX: ADD TDS UI CHECKBOX & ENTRY (FOR BULK MODE) ---
+    tds_f = tk.Frame(form_f, bg=t["bg"])
+    tds_f.grid(row=3, column=0, columnspan=5, sticky="w", pady=5)
+    
+    tds_var = tk.BooleanVar(value=False)
+    tds_chk = tk.Checkbutton(tds_f, text="We Deducted TDS", variable=tds_var, bg=t["bg"], fg=t["accent_blue"], selectcolor=t["bg"], activebackground=t["bg"], activeforeground=t["accent_blue"], font=("Segoe UI", 10, "bold"), cursor="hand2")
+    tds_chk.pack(side="left")
+    
+    tds_rate_var = tk.StringVar(value="1%")
+    tds_rate_cb = ttk.Combobox(tds_f, textvariable=tds_rate_var, values=["Auto Balance", "1%", "2%", "5%", "10%", "Custom"], state="readonly", width=12, style="Portal.TCombobox")
+    
+    tds_amt_var = tk.StringVar(value="0")
+    tds_ent = tk.Entry(tds_f, textvariable=tds_amt_var, font=("Segoe UI", 11, "bold"), bg=t["card"], fg=t["text"], insertbackground=t["text"], highlightbackground=t["border"], highlightcolor=t["accent_blue"], highlightthickness=1, bd=0, relief="flat", width=12)
+    
+    _is_auto_updating = [False]
+    def on_tds_manual_edit(*args):
+        if not _is_auto_updating[0] and tds_var.get():
+            tds_rate_var.set("Custom")
+            
+    tds_amt_var.trace_add("write", on_tds_manual_edit)
+    tds_rate_var.trace_add("write", lambda *a: recalculate())
+    
+    def toggle_tds(*args):
+        if tds_var.get():
+            tds_rate_cb.pack(side="left", padx=(10, 5), ipady=2)
+            tds_ent.pack(side="left", padx=5, ipady=3)
+        else:
+            tds_rate_cb.pack_forget()
+            tds_ent.pack_forget()
+            _is_auto_updating[0] = True
+            tds_amt_var.set("0")
+            _is_auto_updating[0] = False
+            tds_rate_var.set("1%")
+        recalculate()
+        
+    tds_var.trace_add("write", toggle_tds)
+
+    waive_var = tk.BooleanVar(value=False)
+    waive_chk = tk.Checkbutton(form_f, text="", variable=waive_var, bg=t["bg"], fg=t["error"], selectcolor=t["bg"], activebackground=t["bg"], activeforeground=t["error"], font=("Segoe UI", 10, "bold"), cursor="hand2")
+    # ------------------------------------------------------------
+
     tk.Label(auto_pop, text="Select Bills to Pay (Top to Bottom Allocation):", bg=t["bg"], fg=t["text_sec"], font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=30, pady=(5, 0))
 
     table_f = tk.Frame(auto_pop, bg=t["card"], highlightbackground=t["border"], highlightthickness=1)
@@ -776,31 +954,67 @@ def open_auto_payment_dialog(portal, parent_popup, vendor_name, refresh_cb, undo
 
     def recalculate(*args):
         amt = parse_eu_num(pay_var.get())
-        remaining = amt
-        
         current_selection_sum = sum(raw_balances.get(b_id, 0.0) for b_id in selected_bills)
         selected_total_var.set(f"Selected Total: {format_currency(current_selection_sum, curr_format)}")
+        
+        # --- SMART TDS AUTO-FILL ---
+        if tds_var.get() and not _is_auto_updating[0]:
+            rate_val = tds_rate_var.get()
+            calc_tds = None
+            if rate_val == "Auto Balance":
+                calc_tds = max(0.0, current_selection_sum - amt)
+            elif rate_val.endswith("%"):
+                pct = float(rate_val.replace("%", "")) / 100.0
+                selected_subtotal = sum(raw_subtotals.get(b_id, 0.0) for b_id in selected_bills)
+                calc_tds = int((selected_subtotal * pct) + 0.5)
+                
+            if calc_tds is not None:
+                current_tds_val = parse_eu_num(tds_amt_var.get())
+                if abs(current_tds_val - calc_tds) > 0.001:
+                    _is_auto_updating[0] = True
+                    tds_amt_var.set(f"{calc_tds:.2f}")
+                    if rate_val.endswith("%"):
+                        new_amt = max(0.0, current_selection_sum - calc_tds)
+                        pay_var.set(f"{new_amt:.2f}")
+                        amt = new_amt
+                    _is_auto_updating[0] = False
+        # ---------------------------
+        
+        try: tds_amt = parse_eu_num(tds_amt_var.get()) if tds_var.get() else 0.0
+        except: tds_amt = 0.0
+        
+        eff_amt = amt + tds_amt
+        remaining_unaccounted = current_selection_sum - eff_amt
+        
+        tds_chk.config(text="We Deducted TDS")
+            
+        waive_chk.grid_forget()
+        
+        preview_allocs = compute_proportional_allocations(selected_bills, raw_balances, amt, tds_amt, waive_var.get(), raw_subtotals)
         
         for child in tree.get_children():
             if "empty" in tree.item(child, "tags"): continue 
             b_id = child
-            bal = raw_balances.get(b_id, 0.0)
             
-            if b_id in selected_bills:
-                alloc = min(bal, remaining)
-                remaining -= alloc
-            else:
-                alloc = 0.0
-                
+            alloc_info = preview_allocs.get(b_id, {"total": 0.0})
+            tot_alloc = alloc_info["total"]
+            
             vals = list(tree.item(b_id, "values"))
-            vals[4] = format_currency(alloc, curr_format) if alloc > 0 else "-"
+            vals[4] = format_currency(tot_alloc, curr_format) if tot_alloc > 0 else "-"
             tree.item(b_id, values=vals)
-            allocations[b_id] = alloc
+            allocations[b_id] = alloc_info
             
-        if remaining > 0:
-            unallocated_var.set(f"⚠️ Overpayment Blocked: {format_currency(remaining, curr_format)}")
+        if remaining_unaccounted < -0.01:
+            unallocated_var.set(f"⚠️ Overpayment Blocked: {format_currency(abs(remaining_unaccounted), curr_format)}")
         else:
             unallocated_var.set("")
+            if 0 <= remaining_unaccounted <= current_selection_sum and remaining_unaccounted > 0.01:
+                waive_chk.config(text=f"Waive remaining {format_currency(remaining_unaccounted, curr_format)} (Write-Off)")
+                waive_chk.grid(row=4, column=0, columnspan=5, sticky="w", pady=5)
+                auto_pop.geometry(f"{pop_w}x{pop_h + 40}")
+            else:
+                waive_var.set(False)
+                auto_pop.geometry(f"{pop_w}x{pop_h}")
 
     def toggle_select_all(e):
         region = tree.identify("region", e.x, e.y)
@@ -877,12 +1091,19 @@ def open_auto_payment_dialog(portal, parent_popup, vendor_name, refresh_cb, undo
 
     pay_var.trace_add("write", recalculate)
     mode_var.trace_add("write", recalculate)
+    tds_amt_var.trace_add("write", recalculate)
 
     def process_auto_payment():
         import shutil
         import time
+        import re
+        
         amt = parse_eu_num(pay_var.get())
-        if amt <= 0: return
+        tds_amt = parse_eu_num(tds_amt_var.get()) if tds_var.get() else 0.0
+        eff_amt = amt + tds_amt
+        is_waive = waive_var.get()
+
+        if eff_amt <= 0 and not is_waive: return
 
         is_wallet = "Wallet Deduction" in mode_var.get()
         
@@ -945,20 +1166,46 @@ def open_auto_payment_dialog(portal, parent_popup, vendor_name, refresh_cb, undo
             try: c.execute("ALTER TABLE party_payments ADD COLUMN attachment_path TEXT")
             except: pass
             
+            final_allocs = compute_proportional_allocations(selected_bills, raw_balances, amt, tds_amt, is_waive, raw_subtotals)
+
+            actual_cash_applied = 0.0
+            actual_tds_applied = 0.0
+            actual_woff_applied = 0.0
+            
+            breakdown_cash = []
+            breakdown_tds = []
+            breakdown_woff = []
+            
             for p in unpaid:
-                b_id_str = str(p[0])
-                alloc = allocations.get(b_id_str, 0.0)
-                if alloc > 0:
-                    b_id, p_date, b_num, tot, paid_so_far, bal_due, woff, stat = p
+                b_id = p[0]
+                b_id_str = str(b_id)
+                if b_id_str in selected_bills:
+                    b_date, b_num, tot, paid_so_far, bal_due, woff, stat = p[1], p[2], p[3], p[4], p[5], p[6], p[7]
                     woff = woff if woff else 0.0
                     
-                    new_paid = paid_so_far + alloc
-                    new_bal = max(0.0, tot - new_paid - woff)
-                    new_status = 'Paid' if new_bal <= 0.01 else 'Partial'
+                    info = final_allocs.get(b_id_str, {"cash": 0.0, "tds": 0.0, "woff": 0.0})
+                    alloc_cash = info["cash"]
+                    alloc_tds = info["tds"]
+                    alloc_woff = info["woff"]
                     
-                    c.execute("UPDATE purchases SET amount_paid=?, balance_due=?, write_off=?, status=? WHERE id=? AND company_id=?", (new_paid, new_bal, woff, new_status, b_id, comp_id))
-                    breakdown.append((b_num, alloc))
-                    actual_applied += alloc
+                    if alloc_cash > 0 or alloc_tds > 0 or alloc_woff > 0:
+                        new_paid = paid_so_far + alloc_cash + alloc_tds
+                        new_woff = woff + alloc_woff
+                        new_bal = round(max(0.0, tot - new_paid - new_woff), 2)
+                        new_status = 'Paid' if new_bal <= 0.01 else 'Partial'
+                        
+                        c.execute("UPDATE purchases SET amount_paid=?, balance_due=?, write_off=?, status=? WHERE id=? AND company_id=?", 
+                                  (new_paid, new_bal, new_woff, new_status, b_id, comp_id))
+                        
+                        if alloc_cash > 0:
+                            breakdown_cash.append(f"{b_num} ({format_currency(alloc_cash, curr_format)})")
+                            actual_cash_applied += alloc_cash
+                        if alloc_tds > 0:
+                            breakdown_tds.append(f"{b_num} ({format_currency(alloc_tds, curr_format)})")
+                            actual_tds_applied += alloc_tds
+                        if alloc_woff > 0:
+                            breakdown_woff.append(f"{b_num} ({format_currency(alloc_woff, curr_format)})")
+                            actual_woff_applied += alloc_woff
 
             new_inv_states = []
             for inv_dict in old_inv_states:
@@ -966,25 +1213,40 @@ def open_auto_payment_dialog(portal, parent_popup, vendor_name, refresh_cb, undo
                 r = c.fetchone()
                 new_inv_states.append({"id": inv_dict["id"], "paid": r[0], "bal": r[1], "woff": r[2], "status": r[3]})
 
-            if is_wallet: update_wallet_balance(c, comp_id, vendor_name, -actual_applied, portal_vid)
+            if is_wallet: update_wallet_balance(c, comp_id, vendor_name, -actual_cash_applied, portal_vid)
 
             inserted_ids = []
             inserted_rows = []
-
-            if actual_applied > 0:
-                # --- THE FIX: Grab the secure ID directly from portal memory ---
-                vend_id = getattr(portal, 'vend_id', None)
-                # ---------------------------------------------------------------
-                
-                ref_str = " | ".join([f"{inv_no} ({format_currency(chunk_amt, curr_format)})" for inv_no, chunk_amt in breakdown])
+            vend_id = getattr(portal, 'vend_id', None)
+            
+            if actual_cash_applied > 0:
+                ref_str = " | ".join(breakdown_cash)
                 c.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes, attachment_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                          (comp_id, vendor_name, vend_id, 'make', db_date, actual_applied * amt_sign, clean_mode, ref_str, notes_var.get() or "Selected Bulk Payment", final_attach))
+                          (comp_id, vendor_name, vend_id, 'make', db_date, actual_cash_applied * amt_sign, clean_mode, ref_str, notes_var.get() or "Selected Bulk Payment", final_attach))
+                nid = c.lastrowid
+                inserted_ids.append(nid)
+                c.execute("SELECT id, company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes, attachment_path FROM party_payments WHERE id=?", (nid,))
+                inserted_rows.append(c.fetchone())
+                
+            if actual_tds_applied > 0:
+                ref_str = " | ".join(breakdown_tds)
+                c.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes, attachment_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                          (comp_id, vendor_name, vend_id, 'make', db_date, actual_tds_applied * amt_sign, "TDS Deduction", ref_str, "TDS Deducted by Us", ""))
+                nid = c.lastrowid
+                inserted_ids.append(nid)
+                c.execute("SELECT id, company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes, attachment_path FROM party_payments WHERE id=?", (nid,))
+                inserted_rows.append(c.fetchone())
+                
+            if actual_woff_applied > 0:
+                ref_str = " | ".join(breakdown_woff)
+                c.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes, attachment_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                          (comp_id, vendor_name, vend_id, 'make', db_date, actual_woff_applied * amt_sign, "Write-Off", ref_str, "Balance Waived (Write-Off)", ""))
                 nid = c.lastrowid
                 inserted_ids.append(nid)
                 c.execute("SELECT id, company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes, attachment_path FROM party_payments WHERE id=?", (nid,))
                 inserted_rows.append(c.fetchone())
                           
-            wallet_change = -actual_applied if is_wallet else 0.0
+            wallet_change = -actual_cash_applied if is_wallet else 0.0
             
             if undo_cb:
                 undo_cb({
@@ -995,11 +1257,24 @@ def open_auto_payment_dialog(portal, parent_popup, vendor_name, refresh_cb, undo
                     "new_inv_states": new_inv_states
                 })
 
-            if actual_applied > 0:
-                database.log_audit("Purchases", "Bulk Payment", record_ref=f"{len(breakdown)} Bills", details=f"Allocated @@CURR:{actual_applied}@@ to {vendor_name} via {clean_mode}", amount=actual_applied, company_id=comp_id)
-
             conn.commit()
             conn.close()
+            
+            if actual_cash_applied > 0 or actual_tds_applied > 0 or actual_woff_applied > 0:
+                extras = []
+                if actual_tds_applied > 0: extras.append(f"TDS: {actual_tds_applied:.2f}")
+                if actual_woff_applied > 0: extras.append(f"Write-Off: {actual_woff_applied:.2f}")
+                extra_str = f" ({', '.join(extras)})" if extras else ""
+                
+                bill_list = ", ".join([b_no.split(" (")[0] for b_no in breakdown_cash + breakdown_tds + breakdown_woff])
+                bill_list = ", ".join(list(dict.fromkeys(bill_list.replace(" ", "").split(","))))
+                
+                database.log_audit(
+                    "Purchases", "Bulk Payment", bill_list,
+                    f"Auto-allocated payment to {vendor_name} via {clean_mode}{extra_str}",
+                    actual_cash_applied if actual_cash_applied > 0 else (actual_tds_applied + actual_woff_applied),
+                    company_id=comp_id
+                )
         except Exception as e: print(f"Allocation Error: {e}")
 
         refresh_cb()

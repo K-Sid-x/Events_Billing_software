@@ -91,6 +91,14 @@ class PurchasePaymentPortal:
 
     def build_ui(self):
         style = ttk.Style(self.pop)
+        
+        # --- THE FIX: Thick Solid Scrollbar Styles! ---
+        style.configure("Portal.Vertical.TScrollbar", background=self.colors["text_sec"], troughcolor=self.colors["bg"], bordercolor=self.colors["bg"], arrowcolor=self.colors["text"], relief="flat")
+        style.configure("Portal.Horizontal.TScrollbar", background=self.colors["text_sec"], troughcolor=self.colors["bg"], bordercolor=self.colors["bg"], arrowcolor=self.colors["text"], relief="flat")
+        style.map("Portal.Vertical.TScrollbar", background=[("active", self.colors["accent_blue"])])
+        style.map("Portal.Horizontal.TScrollbar", background=[("active", self.colors["accent_blue"])])
+        # ----------------------------------------------
+        
         style.configure("Portal.Treeview.Heading", font=("Segoe UI", 10, "bold"), background=self.colors["header"], foreground=self.colors["text"], borderwidth=1, bordercolor=self.colors["border"])
         style.configure("Portal.Treeview", font=("Segoe UI", 11, "bold"), rowheight=38, background=self.colors["card"], fieldbackground=self.colors["card"], foreground=self.colors["text"], borderwidth=0)
         style.map("Portal.Treeview", background=[("selected", self.colors["border"])], foreground=[("selected", self.colors["text"])])
@@ -174,11 +182,17 @@ class PurchasePaymentPortal:
         table_f = tk.Frame(main_frame, bg=self.colors["card"], highlightbackground=self.colors["border"], highlightthickness=1)
         table_f.pack(fill="both", expand=True)
 
-        scroll_y = ttk.Scrollbar(table_f, orient="vertical")
+        # --- THE FIX: Apply the isolated thick scrollbar style ---
+        scroll_y = ttk.Scrollbar(table_f, orient="vertical", style="Portal.Vertical.TScrollbar")
+        scroll_x = ttk.Scrollbar(table_f, orient="horizontal", style="Portal.Horizontal.TScrollbar")
+        # ---------------------------------------------------------
         
-        self.tree = ttk.Treeview(table_f, columns=("date", "bill", "total", "paid", "due", "woff", "status"), show="headings", yscrollcommand=scroll_y.set, style="Portal.Treeview")
+        # --- THE FIX: Added 'ghost', 'subtotal', and 'gst' to the columns tuple! ---
+        self.tree = ttk.Treeview(table_f, columns=("date", "bill", "subtotal", "gst", "total", "paid", "due", "woff", "status", "ghost"), show="headings", yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set, style="Portal.Treeview")
         scroll_y.config(command=self.tree.yview)
+        scroll_x.config(command=self.tree.xview)
         
+        scroll_x.pack(side="bottom", fill="x")
         scroll_y.pack(side="right", fill="y")
         self.tree.pack(side="left", fill="both", expand=True)
 
@@ -192,19 +206,37 @@ class PurchasePaymentPortal:
         except:
             w_dict = {}
 
+        # --- THE FIX: Ghost column trick for locked Main Portal headers ---
         cols = [
-            ("date", "DATE", w_dict.get("date", 120), "center", False), 
-            ("bill", "BILL NO.", w_dict.get("bill", 120), "w", True), 
-            ("total", "TOTAL", w_dict.get("total", 150), "center", False), 
-            ("paid", "PAID", w_dict.get("paid", 150), "center", False), 
-            ("due", "BALANCE", w_dict.get("due", 150), "center", False), 
-            ("woff", "WRITTEN OFF", w_dict.get("woff", 150), "center", False), 
-            ("status", "STATUS", w_dict.get("status", 180), "center", False)
+            ("date", "DATE", w_dict.get("date", 90), "center", False), 
+            ("bill", "BILL NO.", w_dict.get("bill", 130), "w", False), 
+            ("subtotal", "SUBTOTAL", w_dict.get("subtotal", 90), "e", False),
+            ("gst", "GST", w_dict.get("gst", 80), "e", False),
+            ("total", "TOTAL", w_dict.get("total", 100), "e", False), 
+            ("paid", "PAID", w_dict.get("paid", 100), "e", False), 
+            ("due", "BALANCE", w_dict.get("due", 100), "e", False), 
+            ("woff", "WRITTEN OFF", w_dict.get("woff", 100), "e", False), 
+            ("status", "STATUS", w_dict.get("status", 120), "center", False),
+            ("ghost", "", 10, "center", True)
         ]
         
         for c, t, w, a, stretch in cols:
             self.tree.heading(c, text=t, anchor=a)
-            self.tree.column(c, width=w, anchor=a, stretch=stretch)
+            self.tree.column(c, width=w, minwidth=10 if c=="ghost" else 50, anchor=a, stretch=stretch)
+            
+        try:
+            conn = database.get_connection()
+            cur = conn.cursor()
+            cur.execute("SELECT gst_toggle FROM company WHERE id=?", (self.comp_id,))
+            row = cur.fetchone()
+            conn.close()
+            has_gst = (row[0] == 1) if row else False
+        except:
+            has_gst = True
+            
+        if not has_gst:
+            self.tree["displaycolumns"] = ("date", "bill", "total", "paid", "due", "woff", "status", "ghost")
+        # ------------------------------------------------------------------
 
         self.tree.tag_configure("stripe_even", background=self.colors["stripe_even"])
         self.tree.tag_configure("stripe_odd", background=self.colors["stripe_odd"])
@@ -230,7 +262,13 @@ class PurchasePaymentPortal:
     def on_motion(self, event):
         region = self.tree.identify("region", event.x, event.y)
         col = self.tree.identify_column(event.x)
-        if region == "cell" and col in ("#2", "#7"): 
+        
+        # --- THE FIX: Dynamically track status column ---
+        disp_cols = self.tree.cget("displaycolumns")
+        status_col = f"#{len(disp_cols) - 1}" if disp_cols and disp_cols[0] != '#all' else "#9"
+        # ------------------------------------------------
+        
+        if region == "cell" and col in ("#2", status_col): 
             self.tree.config(cursor="hand2")
         else: 
             self.tree.config(cursor="")
@@ -238,13 +276,19 @@ class PurchasePaymentPortal:
     def on_click(self, event):
         region = self.tree.identify("region", event.x, event.y)
         col = self.tree.identify_column(event.x)
+        
+        # --- THE FIX: Dynamically track status column ---
+        disp_cols = self.tree.cget("displaycolumns")
+        status_col = f"#{len(disp_cols) - 1}" if disp_cols and disp_cols[0] != '#all' else "#9"
+        # ------------------------------------------------
+        
         if region == "cell":
             item = self.tree.selection()
             if not item or "empty" in self.tree.item(item[0], "tags"): return
             b_id = item[0]
             
-            if col == "#7":
-                for r in self.raw_bills:
+            if col == status_col:
+                for r in getattr(self, "raw_bills", []):
                     if str(r[0]) == b_id:
                         try:
                             conn = database.get_connection()
@@ -257,13 +301,16 @@ class PurchasePaymentPortal:
                                 return
                         except: pass
                         
-                        tot = float(r[3] or 0.0)
-                        paid = float(r[4] or 0.0)
-                        woff = float(r[6] or 0.0)
+                        # --- THE FIX: Accurately map indices from the new 10-column query ---
+                        tot = float(r[5] or 0.0)
+                        paid = float(r[6] or 0.0)
+                        woff = float(r[8] or 0.0)
+                        
                         if max(0.0, tot - paid - woff) <= 0.01:
                             messagebox.showinfo("Fully Paid", f"Bill #{r[2]} is already fully paid.", parent=self.pop)
                         else:
-                            open_partial_payment_dialog(self, self.pop, r, self.load_data, self.vendor_name, self.push_undo)
+                            old_format_r = (r[0], r[1], r[2], r[5], r[6], r[7], r[8], r[9])
+                            open_partial_payment_dialog(self, self.pop, old_format_r, self.load_data, self.vendor_name, self.push_undo)
                         break
 
     def on_double_click(self, event):
@@ -285,11 +332,11 @@ class PurchasePaymentPortal:
         try:
             conn = database.get_connection()
             c = conn.cursor()
-            # --- THE FIX: Fetch bills by ID to prevent twin mixing! ---
+            # --- THE FIX: Fetch subtotal and gst components from the database ---
             if self.vend_id:
-                c.execute("SELECT id, purchase_date, bill_number, total, amount_paid, balance_due, write_off, status FROM purchases WHERE vendor_id=? AND company_id=? AND is_deleted=0 AND is_draft=0 ORDER BY purchase_date ASC", (self.vend_id, self.comp_id))
+                c.execute("SELECT id, purchase_date, bill_number, subtotal, (cgst+sgst+igst) as total_gst, total, amount_paid, balance_due, write_off, status FROM purchases WHERE vendor_id=? AND company_id=? AND is_deleted=0 AND is_draft=0 ORDER BY purchase_date ASC", (self.vend_id, self.comp_id))
             else:
-                c.execute("SELECT id, purchase_date, bill_number, total, amount_paid, balance_due, write_off, status FROM purchases WHERE vendor_name=? AND company_id=? AND is_deleted=0 AND is_draft=0 ORDER BY purchase_date ASC", (self.vendor_name, self.comp_id))
+                c.execute("SELECT id, purchase_date, bill_number, subtotal, (cgst+sgst+igst) as total_gst, total, amount_paid, balance_due, write_off, status FROM purchases WHERE vendor_name=? AND company_id=? AND is_deleted=0 AND is_draft=0 ORDER BY purchase_date ASC", (self.vendor_name, self.comp_id))
             self.raw_bills = c.fetchall()
             conn.close()
             # ----------------------------------------------------------
@@ -301,8 +348,15 @@ class PurchasePaymentPortal:
             idx = 0
             
             for r in self.raw_bills:
-                b_id, p_date, b_num, tot, paid, due, woff, stat = r
+                b_id, p_date, b_num, sub, total_gst, tot, paid, due, woff, stat = r
                 woff = woff if woff else 0.0
+                
+                # Prevent 'NoneType' conversion errors
+                sub = float(sub or 0.0)
+                total_gst = float(total_gst or 0.0)
+                tot = float(tot or 0.0)
+                paid = float(paid or 0.0)
+                due = float(due or 0.0)
                 
                 tot_billed += tot
                 tot_paid += paid
@@ -315,10 +369,10 @@ class PurchasePaymentPortal:
                 
                 bg_tag = "stripe_even" if idx % 2 == 0 else "stripe_odd"
                 
-                if due <= 0:
+                if due <= 0.01:
                     stat_txt = "Paid"
                     stat_tag = "status_paid"
-                elif paid > 0:
+                elif paid > 0 or woff > 0:
                     stat_txt = f"Partial ({format_currency(due, self.curr_fmt)} due)"
                     stat_tag = "status_partial"
                 else:
@@ -327,7 +381,15 @@ class PurchasePaymentPortal:
                 
                 fmt_date = smart_date_formatter(p_date, self.date_fmt)
                 
-                self.tree.insert("", "end", iid=str(b_id), values=(fmt_date, b_num, format_currency(tot, self.curr_fmt), format_currency(paid, self.curr_fmt), format_currency(running_bal, self.curr_fmt), format_currency(woff, self.curr_fmt), stat_txt), tags=(bg_tag, stat_tag))
+                # --- THE FIX: Insert all 10 columns including Subtotal and GST! ---
+                self.tree.insert("", "end", iid=str(b_id), values=(
+                    fmt_date, b_num, 
+                    format_currency(sub, self.curr_fmt), format_currency(total_gst, self.curr_fmt),
+                    format_currency(tot, self.curr_fmt), format_currency(paid, self.curr_fmt), 
+                    format_currency(running_bal, self.curr_fmt), format_currency(woff, self.curr_fmt), 
+                    stat_txt, ""
+                ), tags=(bg_tag, stat_tag))
+                # ------------------------------------------------------------------
                 idx += 1
                 
             for j in range(idx, 15):
@@ -482,10 +544,18 @@ class PurchasePaymentPortal:
         table_f = tk.Frame(h_pop, bg=self.colors["card"], highlightbackground=self.colors["border"], highlightthickness=1)
         table_f.pack(fill="both", expand=True, padx=20, pady=(0, 20))
         
-        scroll_y = ttk.Scrollbar(table_f, orient="vertical")
-        h_tree = ttk.Treeview(table_f, columns=("date", "mode", "ref", "notes", "amount", "action"), show="headings", yscrollcommand=scroll_y.set, style="Portal.Treeview")
+        # --- THE FIX: Apply the isolated thick scrollbar style ---
+        scroll_y = ttk.Scrollbar(table_f, orient="vertical", style="Portal.Vertical.TScrollbar")
+        scroll_x = ttk.Scrollbar(table_f, orient="horizontal", style="Portal.Horizontal.TScrollbar")
+        # ---------------------------------------------------------
+        
+        # --- THE FIX: Ghost column trick for locked History Portal headers ---
+        h_tree = ttk.Treeview(table_f, columns=("date", "mode", "ref", "notes", "amount", "action", "ghost"), show="headings", yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set, style="Portal.Treeview")
         
         scroll_y.config(command=h_tree.yview)
+        scroll_x.config(command=h_tree.xview)
+        
+        scroll_x.pack(side="bottom", fill="x")
         scroll_y.pack(side="right", fill="y")
         h_tree.pack(side="left", fill="both", expand=True)
 
@@ -495,6 +565,7 @@ class PurchasePaymentPortal:
         h_tree.heading("notes", text="NOTES", anchor="w")
         h_tree.heading("amount", text="AMOUNT", anchor="e")
         h_tree.heading("action", text="PROOF", anchor="center")
+        h_tree.heading("ghost", text="")
         
         try:
             conn = database.get_connection()
@@ -508,16 +579,19 @@ class PurchasePaymentPortal:
 
         h_tree.column("date", width=h_w_dict.get("date", 110), anchor="center", stretch=False)
         h_tree.column("mode", width=h_w_dict.get("mode", 140), anchor="center", stretch=False)
-        h_tree.column("ref", width=h_w_dict.get("ref", 200), anchor="w", stretch=True)
-        h_tree.column("notes", width=h_w_dict.get("notes", 230), anchor="w", stretch=True)
+        h_tree.column("ref", width=h_w_dict.get("ref", 200), anchor="w", stretch=False)
+        h_tree.column("notes", width=h_w_dict.get("notes", 230), anchor="w", stretch=False)
         h_tree.column("amount", width=h_w_dict.get("amount", 130), anchor="e", stretch=False)
         h_tree.column("action", width=h_w_dict.get("action", 120), anchor="center", stretch=False)
+        h_tree.column("ghost", width=10, minwidth=10, stretch=True)
 
         h_tree.tag_configure("stripe_even", background=self.colors["stripe_even"])
         h_tree.tag_configure("stripe_odd", background=self.colors["stripe_odd"])
 
         def save_hist_widths():
-            new_w = {c: h_tree.column(c, "width") for c in h_tree["columns"] if c not in ("ref", "notes")}
+            # --- THE FIX: Save all adjusted columns except 'ghost' so they don't snap back! ---
+            new_w = {c: h_tree.column(c, "width") for c in h_tree["columns"] if c != "ghost"}
+            # ----------------------------------------------------------------------------------
             try:
                 database.save_ui_setting(f"purch_portal_hist_cols_{self.comp_id}", json.dumps(new_w))
             except: pass
