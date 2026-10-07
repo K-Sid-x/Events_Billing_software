@@ -549,12 +549,29 @@ def preview_purchase_voucher(data, comp_id, curr_fmt):
             running_total += amt
             gst_str = str(int(gst)) if gst.is_integer() else str(gst)
 
+            # --- THE FIX: Smartly parse quantity for HTML PDF ---
+            q_str = f"{q:g} " if q > 0.001 else ""
+            u_str = str(it.get('unit', '')).strip()
+            display_qty = f"{q_str}{u_str}".strip()
+            # ----------------------------------------------------
+
+            # --- THE FIX: Parse inline [B] and [U] tags into HTML for Purchase PDFs ---
+            raw_p_name = str(it.get('name', ''))
+            p_html = raw_p_name.replace("@@B@@", "[B]").replace("@@U@@", "[U]")
+            if "[B]" in p_html and "[/B]" not in p_html: p_html += "[/B]"
+            if "[U]" in p_html and "[/U]" not in p_html: p_html += "[/U]"
+            
+            p_html = p_html.replace("[B]", "<span style='font-weight: bold;'>").replace("[/B]", "</span>")
+            p_html = p_html.replace("[U]", "<span style='text-decoration: underline; text-underline-offset: 3px; text-decoration-skip-ink: none;'>").replace("[/U]", "</span>")
+            p_html = p_html.replace('\n', '<br>').replace("  ", "&nbsp;&nbsp;")
+            # --------------------------------------------------------------------------
+
             html_content += f"""
             <tr>
                 <td style="{get_css('tr_slno')} text-align: center; white-space: nowrap;">{global_item_idx}</td>
-                <td style="{get_css('tr_part')} word-wrap: break-word; white-space: pre-wrap;">{it['name']}</td>
+                <td style="{get_css('tr_part')} word-wrap: break-word; white-space: pre-wrap;">{p_html}</td>
                 {f'<td style="{get_css("tr_hsn")} text-align: center; white-space: nowrap;">{it.get("hsn", "")}</td>' if has_gst else ''}
-                <td style="{get_css('tr_qty')} text-align: center; white-space: nowrap;">{q:g} {it['unit']}</td>
+                <td style="{get_css('tr_qty')} text-align: center; white-space: nowrap;">{display_qty}</td>
                 {f'<td style="{get_css("tr_gst")} text-align: center; white-space: nowrap;">{gst_str}%</td>' if has_gst else ''}
                 {f'<td style="{get_css("tr_rate_inc")} text-align: right; white-space: nowrap;">{c_sym} {fmt_num(r_inc)}</td>' if has_gst else ''}
                 <td style="{get_css('tr_rate')} text-align: right; white-space: nowrap;">{c_sym} {fmt_num(r_base)}</td>

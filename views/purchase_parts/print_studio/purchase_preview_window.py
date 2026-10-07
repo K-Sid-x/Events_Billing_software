@@ -326,13 +326,13 @@ def open_purchase_preview(view, p_id):
             curr_fmt, _ = fetch_global_settings(sv.comp_id)
             preview_purchase_voucher(sv.export_payload, sv.comp_id, curr_fmt)
             
-    btn_print = tk.Button(print_f, text="⎙\nPrint", font=("Segoe UI", 12, "bold"), bg="#10b981", fg="#ffffff", relief="flat", cursor="hand2", width=8, height=2, command=trigger_print)
+    btn_print = tk.Button(print_f, text="🖨️\nPrint", font=("Segoe UI", 12, "bold"), bg="#10b981", fg="#ffffff", relief="flat", cursor="hand2", width=8, height=2, command=trigger_print)
     btn_print.pack(side="left")
 
     copies_f = tk.Frame(print_f, bg="#323232")
     copies_f.pack(side="left", padx=(15, 0), anchor="center")
     tk.Label(copies_f, text="Copies:", font=("Segoe UI", 9), bg="#323232", fg="#cccccc").pack(anchor="w", pady=(0, 2))
-    tk.Spinbox(copies_f, from_=1, to=10, width=5, font=("Segoe UI", 11), justify="center").pack(anchor="w")
+    tk.Spinbox(copies_f, from_=1, to=10, width=5, font=("Segoe UI", 11), justify="center", bg="#444444", fg="white", buttonbackground="#323232", relief="solid", bd=1).pack(anchor="w")
 
     def trigger_whatsapp():
         phone = "N/A"
@@ -358,7 +358,7 @@ def open_purchase_preview(view, p_id):
         else:
             webbrowser.open(f"https://api.whatsapp.com/send?text={safe_msg}")
 
-    btn_wa = tk.Button(left_panel, text="✆ Send to WhatsApp", font=("Segoe UI", 10, "bold"), bg="#10b981", fg="#ffffff", relief="flat", cursor="hand2", pady=8, command=trigger_whatsapp)
+    btn_wa = tk.Button(left_panel, text="💬 Send to WhatsApp", font=("Segoe UI", 10, "bold"), bg="#10b981", fg="#ffffff", relief="flat", cursor="hand2", pady=8, command=trigger_whatsapp)
     btn_wa.pack(fill="x", padx=15, pady=(20, 10))
     
     if hasattr(sv, 'receipt_path') and sv.receipt_path and os.path.exists(sv.receipt_path):

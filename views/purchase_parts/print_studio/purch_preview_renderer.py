@@ -62,14 +62,14 @@ def render_purch_preview(sv):
     head_bg = sv.colors.get("tab_head_bg", tk.StringVar(value="#475569")).get()
     font_fam = sv.font_family.get()
 
-    def c_txt(x, y, text, key, anchor="nw", max_w=None, force_bold=False, shrink_fit=False, pad_bot=4):
+    def c_txt(x, y, text, key, anchor="nw", max_w=None, force_bold=False, force_underline=False, shrink_fit=False, pad_bot=4):
         if not text: return y
         try: f_sz = max(4, int(int(float(sv.fonts[key].get() or 10)) * sf))
         except: f_sz = max(4, int(10 * sf))
         
         mods = []
         if (key in sv.bolds and sv.bolds[key].get()) or force_bold: mods.append("bold")
-        if key in sv.underlines and sv.underlines[key].get(): mods.append("underline")
+        if (key in sv.underlines and sv.underlines[key].get()) or force_underline: mods.append("underline")
         f_str = " ".join(mods)
         
         just = tk.LEFT
@@ -174,15 +174,28 @@ def render_purch_preview(sv):
     all_items = []
     if has_actual_data:
         for i, it in enumerate(sv.actual_bill_data['items'], 1):
+            raw_name = str(it.get('name', ''))
+            
+            # --- THE FIX: Smartly parse quantity so blanks stay blank! ---
+            try:
+                q_val = float(it.get('qty', 0))
+                q_str = f"{q_val:g} " if q_val > 0.001 else ""
+            except:
+                q_str = ""
+                
+            u_str = str(it.get('unit', '')).strip()
+            display_qty = f"{q_str}{u_str}".strip()
+            # -------------------------------------------------------------
+            
             if has_gst:
                 all_items.append([
-                    str(i), it['name'], it['hsn'], f"{it['qty']:g} {it['unit']}", 
+                    str(i), raw_name, it['hsn'], display_qty, 
                     f"{it['gst']:g}%", f"{c_sym} {fmt_num(it['rate_inc'])}", 
                     f"{c_sym} {fmt_num(it['rate'])}", f"{c_sym} {fmt_num(it['amt'])}"
                 ])
             else:
                 all_items.append([
-                    str(i), it['name'], f"{it['qty']:g} {it['unit']}", 
+                    str(i), raw_name, display_qty, 
                     f"{c_sym} {fmt_num(it['rate'])}", f"{c_sym} {fmt_num(it['amt'])}"
                 ])
     else:
@@ -415,7 +428,16 @@ def render_purch_preview(sv):
             col_w = (cxs[2] - cxs[1]) - s(8)
             f_sz = max(4, int(10 * sf))
             chars_per_line = max(1, int(col_w / (f_sz * 0.55)))
-            lines = max(1, len(r_data[1]) // chars_per_line + (1 if len(r_data[1]) % chars_per_line > 0 else 0))
+            
+            # --- THE FIX: Accurately calculate lines supporting explicit newlines (Alt+Enter) ---
+            name_text = r_data[1]
+            total_lines = 0
+            for subline in name_text.split('\n'):
+                sub_len = len(subline)
+                total_lines += max(1, sub_len // chars_per_line + (1 if sub_len % chars_per_line > 0 else 0))
+            lines = max(1, total_lines)
+            # -----------------------------------------------------------------------------------
+            
             predicted_item_h = max(s(16), int(lines * f_sz * 1.2) + s(2))
             
             safe_pad = s(35)
@@ -440,14 +462,30 @@ def render_purch_preview(sv):
             row_bottom_y = ry + s(14) 
             
             for i, (_, _, rkey, _, anc, _) in enumerate(cols):
-                tx = cxs[i] + (cxs[i+1]-cxs[i])/2 if anc == "center" else (cxs[i+1]-s(5) if anc == "e" else cxs[i]+s(5))
                 col_max_w = (cxs[i+1] - cxs[i]) - s(8)
                 if col_max_w < 5: col_max_w = 5
                 
-                is_shrink = (i != 1)
-                cell_end_y = c_txt(tx, ry + s(2), r_data[i], rkey, anchor="n" if anc=="center" else ("ne" if anc=="e" else "nw"), max_w=col_max_w, shrink_fit=is_shrink, pad_bot=2)
-                if cell_end_y > row_bottom_y:
-                    row_bottom_y = cell_end_y
+                if i == 1:
+                    curr_line_y = ry + s(2)
+                    raw_particulars = str(r_data[1])
+                    for line in raw_particulars.split('\n'):
+                        l_b = "@@B@@" in line or "[B]" in line
+                        l_u = "@@U@@" in line or "[U]" in line
+                        c_line = line.replace("@@B@@", "").replace("@@U@@", "")
+                        c_line = re.sub(r'\[/?(B|U)\]', '', c_line)
+                        
+                        if c_line.strip() == "":
+                            curr_line_y += s(12)
+                        else:
+                            curr_line_y = c_txt(cxs[1] + s(5), curr_line_y, c_line, rkey, anchor="nw", max_w=col_max_w, force_bold=l_b, force_underline=l_u, shrink_fit=False, pad_bot=2)
+                    if curr_line_y > row_bottom_y:
+                        row_bottom_y = curr_line_y
+                else:
+                    tx = cxs[i] + (cxs[i+1]-cxs[i])/2 if anc == "center" else (cxs[i+1]-s(5) if anc == "e" else cxs[i]+s(5))
+                    is_shrink = (i != 1)
+                    cell_end_y = c_txt(tx, ry + s(2), r_data[i], rkey, anchor="n" if anc=="center" else ("ne" if anc=="e" else "nw"), max_w=col_max_w, shrink_fit=is_shrink, pad_bot=2)
+                    if cell_end_y > row_bottom_y:
+                        row_bottom_y = cell_end_y
                     
             amt_str = r_data[7 if has_gst else 4].replace(c_sym, '').replace(',', '').strip()
             try: running_total += float(amt_str)
