@@ -215,7 +215,14 @@ class PurchaseForm:
                     if 'item' in r: r['item'].set(it[0])
                     if 'hsn' in r: r['hsn'].set(it[1])
                     if 'rate' in r: r['rate'].set(_clean_num(it[2]))
-                    if 'qty' in r: r['qty'].set(_clean_num(it[3]))
+                    if 'qty' in r: 
+                        # --- THE FIX: Respect BOTH manual 1s and intentional blanks! ---
+                        saved_qty = str(it[3]).strip()
+                        if not saved_qty or saved_qty in ["0.0", "0", "None"]:
+                            r['qty'].set("")
+                        else:
+                            r['qty'].set(_clean_num(saved_qty))
+                        # ---------------------------------------------------------------
                     if 'unit' in r: r['unit'].set(it[5])
                     if 'gst' in r: r['gst'].set(_clean_num(it[6]))
                     if 'rate_inc' in r: r['rate_inc'].set(_clean_num(it[7]))
@@ -604,8 +611,10 @@ class PurchaseForm:
         status_f.pack(side="left")
 
         def attach_receipt():
-            path = filedialog.askopenfilename(parent=self.pop, title="Select Receipt", filetypes=[("Image Files", "*.png *.jpg *.jpeg"), ("PDF Files", "*.pdf")])
+            # --- THE FIX: Fixed Windows extension syntax and made All Supported Files the default! ---
+            path = filedialog.askopenfilename(parent=self.pop, title="Select Receipt", filetypes=[("All Supported Files", "*.pdf;*.png;*.jpg;*.jpeg"), ("PDF Documents", "*.pdf"), ("Image Files", "*.png;*.jpg;*.jpeg"), ("All Files", "*.*")])
             if path: self.receipt_var.set(path)
+            # ---------------------------------------------------------------------------------------
             
         btn_attach = tk.Button(status_f, text="📎 Attach Receipt", font=("Segoe UI", 10), bg=self.HOVER_BG, fg=self.TEXT_PRIMARY, relief="flat", cursor="hand2", padx=15, command=attach_receipt)
         btn_attach.pack(side="left", padx=(20, 5))
@@ -647,6 +656,11 @@ class PurchaseForm:
         self.save_engine = PurchaseSaveEngine(self)
         self.btn_post.config(command=lambda: self.save_engine.initiate_save(is_draft=False))
         self.btn_draft.config(command=lambda: self.save_engine.initiate_save(is_draft=True))
+        
+        # --- THE FIX: Bind Ctrl+P to trigger Live Preview! ---
+        self.pop.bind("<Control-p>", lambda e: self.show_live_preview())
+        self.pop.bind("<Control-P>", lambda e: self.show_live_preview())
+        # -----------------------------------------------------
 
     def show_live_preview(self):
         try:
@@ -672,7 +686,12 @@ class PurchaseForm:
             for r in self.grid_engine.rows_data:
                 item_name = r["item"].get()
                 if not item_name: continue
-                qty = float(str(r["qty"].get() or 0).replace(",", ""))
+                
+                raw_q = str(r["qty"].get()).replace(",", "").strip()
+                # --- THE FIX: Pass 0.0 for blanks so the renderer hides them! ---
+                qty = float(raw_q) if raw_q else 0.0
+                # ----------------------------------------------------------------
+                
                 rate = float(str(r["rate"].get() or 0).replace(",", ""))
                 amt = float(r.get("raw_amt", 0.0))
                 gst = float(str(r["gst"].get() or 0).replace(",", ""))

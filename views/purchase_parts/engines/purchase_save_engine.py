@@ -223,8 +223,13 @@ class PurchaseSaveEngine:
                 except: gst = 0
                 try: r_inc = float(str(r["rate_inc"].get()).replace(",",""))
                 except: r_inc = 0
-                try: qty = float(str(r["qty"].get()).replace(",",""))
-                except: qty = 0
+                
+                raw_q = str(r["qty"].get()).replace(",", "").strip()
+                # --- THE FIX: Save blank quantities as 0.0 so they don't magically turn into 1.0! ---
+                try: qty = float(raw_q) if raw_q else 0.0
+                except: qty = 0.0
+                # -----------------------------------------------------------------------------------
+                
                 try: rate = float(str(r["rate"].get()).replace(",",""))
                 except: rate = 0
                 
