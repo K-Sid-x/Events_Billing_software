@@ -594,6 +594,7 @@ def open_new_invoice(view, edit_inv_id=None, clone_id=None):
                     return str(int(v)) if v.is_integer() else str(v)
                 except: return str(val)
 
+            state.is_swapping = True
             for idx, it in enumerate(items):
                 r = state.item_rows[idx]
                 item_name = str(it[0])
@@ -608,16 +609,13 @@ def open_new_invoice(view, edit_inv_id=None, clone_id=None):
                 r["item"].set(item_name)
                 if "widgets" in r and len(r["widgets"])>1: r["widgets"][1].set_text(item_name)
                 
-                hsn_val = it[1]
+                # --- THE FIX: Strictly trust the Database HSN and Unit (even if user left them blank) ---
+                hsn_val = str(it[1]).strip() if it[1] is not None and str(it[1]) != "None" else ""
                 
-                # --- THE FIX: Strictly trust the Database unit (even if user left it completely blank) ---
                 if len(it) > 6:
                     unit_val = str(it[6]).strip() if it[6] is not None else ""
                 else:
                     unit_val = state.inventory_data.get(item_name, {}).get("unit", "") if item_name in state.inventory_data else ""
-                
-                if item_name in state.inventory_data:
-                    if not hsn_val: hsn_val = state.inventory_data[item_name].get("hsn", "")
                 
                 if unit_val.strip().lower() in ["none", "--select--", "null"]:
                     unit_val = ""
@@ -667,6 +665,7 @@ def open_new_invoice(view, edit_inv_id=None, clone_id=None):
                     current_num += 1
             # -------------------------------------------------------------------
             
+            state.is_swapping = False
             state.calculate_totals()
             
             if hasattr(state, 'subj_text_widget'):

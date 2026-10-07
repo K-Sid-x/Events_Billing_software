@@ -115,12 +115,59 @@ def show_preview_from_db(view, inv_id):
     
     comp_id = getattr(view.winfo_toplevel(), "active_company_id", 1)
     
+    # --- THE FIX: Decouple the Subject and Place of Service! ---
+    raw_place = inv[5]
+    final_place = ""
+    final_subj = ""
+    
+    # --- THE FIX: Explicitly extract Discount and Advance for Saved Previews! ---
+    inc_disc = 0
+    disc_val = "0"
+    disc_typ = "%"
+    inc_adv = 0
+    adv_val = "0"
+
+    if raw_place:
+        import re
+        m_serv = re.search(r'@@SERV@@(.*?)@@', raw_place + "@@", re.DOTALL)
+        if m_serv:
+            parts = m_serv.group(1).split('||')
+            if len(parts) > 1: final_place = parts[1].strip()
+        elif not raw_place.startswith("@@"):
+            final_place = raw_place.strip()
+
+        m_subj = re.search(r'@@SUBJ@@(.*?)@@', raw_place + "@@", re.DOTALL)
+        if m_subj:
+            subj_parts = m_subj.group(1).split('||')
+            if len(subj_parts) > 0: final_subj = subj_parts[0].strip()
+            if len(subj_parts) > 1: final_subj_align = subj_parts[1].strip()
+            
+        m_disc = re.search(r'@@DISC@@(.*?)@@', raw_place + "@@")
+        if m_disc:
+            d_parts = m_disc.group(1).split('||')
+            if len(d_parts) > 0 and d_parts[0].strip().isdigit(): inc_disc = int(d_parts[0].strip())
+            if len(d_parts) > 1: disc_val = d_parts[1].strip()
+            if len(d_parts) > 2: disc_typ = d_parts[2].strip()
+            
+        m_adv = re.search(r'@@ADV@@(.*?)@@', raw_place + "@@")
+        if m_adv:
+            a_parts = m_adv.group(1).split('||')
+            if len(a_parts) > 0 and a_parts[0].strip().isdigit(): inc_adv = int(a_parts[0].strip())
+            if len(a_parts) > 1: adv_val = a_parts[1].strip()
+
     inv_data = {
         "date": inv[1], "inv_date": inv[1], "del_date": inv[2], "inv_num": inv[3], "cust_name": inv[4],
-        "place": inv[5], "subtotal": inv[6], "cgst": inv[7], "sgst": inv[8], 
+        "place": final_place, "subject": final_subj, "subtotal": inv[6], "cgst": inv[7], "sgst": inv[8], 
         "igst": inv[9], "total": inv[10],
-        "cust_id": inv[17] if len(inv) > 17 else None  # --- THE FIX: Pass customer_id to preview ---
+        "cust_id": inv[17] if len(inv) > 17 else None,
+        "inc_discount": inc_disc,
+        "discount_val": disc_val,
+        "discount_type": disc_typ,
+        "inc_advance": inc_adv,
+        "advance_val": adv_val,
+        "raw_place_full": inv[5]
     }
+    # ----------------------------------------------------------------------------
     
     # --- THE FIX: Direct secure SQL replacing database.get_all_inventory() ---
     inv_dict = {}
@@ -288,7 +335,9 @@ def render_preview_window(view, inv_data, items_data):
     inv_data["cust_phone"] = c_p 
     inv_data["words"] = number_to_words(inv_data.get("total", 0))
 
-    raw_place = inv_data.get("place", "")
+    # --- THE FIX: We MUST use the fully intact packed string to extract Banks and Terms! ---
+    raw_place = inv_data.get("raw_place_full", inv_data.get("place", ""))
+    # ---------------------------------------------------------------------------------------
     
     if "@@SERV@@" in raw_place or "@@BANK@@" in raw_place:
         banks_data = unpack_db_place_string(raw_place, inv_data)
@@ -300,6 +349,21 @@ def render_preview_window(view, inv_data, items_data):
         inv_data["serv_bill_date"] = inv_data.get("date", "")
         inv_data["eway_bill"] = "-"
         inv_data["subject_text"] = ""
+        
+    # --- THE FIX: Calculate missing absolute discount amount for Saved Invoices! ---
+    try:
+        if str(inv_data.get("inc_discount", "0")) == "1":
+            sub_t = float(inv_data.get("subtotal", 0.0))
+            d_val = float(inv_data.get("discount_val", 0.0))
+            if "%" in str(inv_data.get("discount_type", "%")):
+                inv_data["discount_amt"] = sub_t * (d_val / 100.0)
+            else:
+                inv_data["discount_amt"] = d_val
+        else:
+            inv_data["discount_amt"] = 0.0
+    except Exception:
+        inv_data["discount_amt"] = 0.0
+    # -------------------------------------------------------------------------------
         
     # --- THE FIX: Reverse Engineer Tax Rates for Live Preview ---
     try:
