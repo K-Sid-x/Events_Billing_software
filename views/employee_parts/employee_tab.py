@@ -66,8 +66,15 @@ class EmployeeTab(tk.Frame):
         self.redo_stack = []
         self.photo_cache = []
 
+        # --- THE FIX: Pagination variables & Search Hook ---
+        self.current_page = 1
+        self.items_per_page = 50
+        self.total_pages = 1
+        
         self.roster_search_timer = None
         def trigger_roster_search(*args):
+            self.current_page = 1
+            self.tree_roster.yview_moveto(0)
             if self.roster_search_timer: self.after_cancel(self.roster_search_timer)
             self.roster_search_timer = self.after(300, self.load_roster)
         self.roster_search_var.trace_add("write", trigger_roster_search)
@@ -358,7 +365,7 @@ class EmployeeTab(tk.Frame):
         
         roster_cb = ttk.Combobox(r_head, textvariable=self.roster_status_var, values=["Active", "Inactive / Resigned", "All Employees"], state="readonly", width=18, font=("Arial", 10), cursor="hand2")
         roster_cb.pack(side="right", padx=(15, 15), ipady=3)
-        roster_cb.bind("<<ComboboxSelected>>", lambda e: self.load_roster())
+        roster_cb.bind("<<ComboboxSelected>>", lambda e: [setattr(self, 'current_page', 1), self.tree_roster.yview_moveto(0), self.load_roster()])
         tk.Label(r_head, text="Status:", bg=self.CARD_BG, font=("Arial", 9, "bold"), fg=self.TEXT_SECONDARY).pack(side="right", padx=(5, 5))
 
         # --- THE FIX: Added Sort Dropdown ---
@@ -367,7 +374,7 @@ class EmployeeTab(tk.Frame):
             
         sort_cb = ttk.Combobox(r_head, textvariable=self.roster_sort_var, values=["ID (Ascending)", "ID (Descending)", "Name (A to Z)", "Name (Z to A)"], state="readonly", width=16, font=("Arial", 10), cursor="hand2")
         sort_cb.pack(side="right", padx=(15, 5), ipady=3)
-        sort_cb.bind("<<ComboboxSelected>>", lambda e: self.load_roster())
+        sort_cb.bind("<<ComboboxSelected>>", lambda e: [setattr(self, 'current_page', 1), self.tree_roster.yview_moveto(0), self.load_roster()])
         tk.Label(r_head, text="Sort By:", bg=self.CARD_BG, font=("Arial", 9, "bold"), fg=self.TEXT_SECONDARY).pack(side="right", padx=(15, 5))
         # ------------------------------------
 
@@ -444,6 +451,23 @@ class EmployeeTab(tk.Frame):
         self.tree_roster.bind("<ButtonRelease-1>", lambda e: self.after(50, save_r_widths) if self.tree_roster.identify_region(e.x, e.y) == "separator" else None, add="+")
         # -----------------------------------------------------------------------
 
+        # --- THE FIX: ADDING PAGINATION UI ---
+        self.pagination_frame = tk.Frame(roster_f, bg=self.BG_COLOR)
+        self.pagination_frame.pack(side="bottom", fill="x", pady=(5, 10))
+        
+        tree_container_r.pack_forget()
+        tree_container_r.pack(side="top", fill="both", expand=True)
+
+        self.btn_prev = tk.Button(self.pagination_frame, text="< Previous", font=("Arial", 10, "bold"), bg=self.BG_COLOR, fg=self.TEXT_SECONDARY, relief="flat", cursor="hand2", command=self.prev_page)
+        self.btn_prev.pack(side="left", expand=True, anchor="e", padx=10)
+
+        self.lbl_page = tk.Label(self.pagination_frame, text="Page 1 of 1", font=("Arial", 10, "bold"), bg=self.BG_COLOR, fg=self.TEXT_PRIMARY)
+        self.lbl_page.pack(side="left", expand=False, anchor="center")
+
+        self.btn_next = tk.Button(self.pagination_frame, text="Next >", font=("Arial", 10, "bold"), bg=self.CARD_BG, fg=self.TEXT_PRIMARY, relief="solid", bd=1, cursor="hand2", command=self.next_page, padx=10, pady=3)
+        self.btn_next.pack(side="left", expand=True, anchor="w", padx=10)
+        # ---------------------------------------------
+
         self.tree_roster.tag_configure("selected_row", background=self.BORDER_COLOR)
         self.tree_roster.tag_configure("evenrow", background=self.BG_COLOR)
         self.tree_roster.tag_configure("oddrow", background=self.CARD_BG)
@@ -482,6 +506,16 @@ class EmployeeTab(tk.Frame):
         self.tree_roster.bind("<ButtonRelease-1>", safe_roster_click, add="+")
         self.tree_roster.bind("<Button-3>", self.on_roster_right_click)
         # -----------------------------------------------------------------------
+
+    def prev_page(self):
+        if self.current_page > 1:
+            self.current_page -= 1
+            self.load_roster()
+
+    def next_page(self):
+        if self.current_page < getattr(self, 'total_pages', 1):
+            self.current_page += 1
+            self.load_roster()
 
     def load_all_data(self):
         comp_id = getattr(self.winfo_toplevel(), "active_company_id", getattr(self.app, "active_company_id", 1))
@@ -576,10 +610,34 @@ class EmployeeTab(tk.Frame):
         # --- SECOND PASS: Force Pinned to Top (Stable Sort) ---
         processed_employees.sort(key=lambda x: x["is_pinned"], reverse=True)
 
-        sno = 1
+        # --- THE FIX: PAGINATION MATH & SLICING ---
+        import math
+        self.total_pages = math.ceil(len(processed_employees) / getattr(self, 'items_per_page', 50))
+        if self.total_pages < 1: self.total_pages = 1
+        if getattr(self, 'current_page', 1) > self.total_pages: self.current_page = self.total_pages
+
+        start_idx = (getattr(self, 'current_page', 1) - 1) * getattr(self, 'items_per_page', 50)
+        end_idx = start_idx + getattr(self, 'items_per_page', 50)
+        
+        paginated_list = processed_employees[start_idx:end_idx]
+
+        if hasattr(self, 'lbl_page'):
+            self.lbl_page.config(text=f"Page {self.current_page} of {self.total_pages}")
+            
+            if self.current_page <= 1:
+                self.btn_prev.config(state="disabled", fg=self.BORDER_COLOR, bg=self.BG_COLOR, cursor="arrow")
+            else:
+                self.btn_prev.config(state="normal", fg=self.TEXT_SECONDARY, bg=self.BG_COLOR, cursor="hand2")
+                
+            if self.current_page >= self.total_pages:
+                self.btn_next.config(state="disabled", bg=self.BG_COLOR, fg=self.BORDER_COLOR, cursor="arrow")
+            else:
+                self.btn_next.config(state="normal", bg=self.CARD_BG, fg=self.TEXT_PRIMARY, cursor="hand2")
+
+        sno = start_idx + 1
         row_counter = 0
         
-        for emp in processed_employees:
+        for emp in paginated_list:
             r = emp["raw_data"]
             emp_id = emp["emp_id"]
             emp_id_str = emp["emp_id_str"]
