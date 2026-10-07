@@ -619,8 +619,7 @@ def build_part_3(parent, state):
             
             # --- THE FIX: Save the row as long as it has text, even if voided! ---
             if clean_name:
-                try: rt = float(r["rate"].get())
-                except: rt = 0.0
+                rt = r["rate"].get().strip()
                 
                 q = r["qty"].get().strip()
                 d = r["days"].get().strip()

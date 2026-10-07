@@ -158,31 +158,77 @@ class ExpandingRichText(tk.Text):
 
     def set_text(self, text_content):
         self.delete("1.0", tk.END)
-        has_bold = "@@B@@" in text_content
-        has_under = "@@U@@" in text_content
-        clean_text = text_content.replace("@@B@@", "").replace("@@U@@", "")
-        self.insert("1.0", clean_text)
+        if not text_content:
+            self.adjust_height()
+            return
+
+        # Legacy support for old bills so they don't break
+        if text_content.startswith("@@B@@") or text_content.startswith("@@U@@"):
+            has_bold = "@@B@@" in text_content
+            has_under = "@@U@@" in text_content
+            clean_text = text_content.replace("@@B@@", "").replace("@@U@@", "")
+            self.insert("1.0", clean_text)
+            if has_bold and has_under: self.tag_add("bold_underline", "1.0", tk.END)
+            elif has_bold: self.tag_add("bold", "1.0", tk.END)
+            elif has_under: self.tag_add("underline", "1.0", tk.END)
+            self.adjust_height()
+            return
+
+        # True Word-by-Word Parser
+        import re
+        parts = re.split(r'(\[B\]|\[/B\]|\[U\]|\[/U\])', text_content)
         
-        if has_bold and has_under: self.tag_add("bold_underline", "1.0", tk.END)
-        elif has_bold: self.tag_add("bold", "1.0", tk.END)
-        elif has_under: self.tag_add("underline", "1.0", tk.END)
+        is_b = False
+        is_u = False
         
+        for part in parts:
+            if part == "[B]": is_b = True
+            elif part == "[/B]": is_b = False
+            elif part == "[U]": is_u = True
+            elif part == "[/U]": is_u = False
+            elif part:
+                start_idx = self.index(tk.INSERT)
+                self.insert(tk.END, part)
+                end_idx = self.index(tk.INSERT)
+                
+                if is_b and is_u: self.tag_add("bold_underline", start_idx, end_idx)
+                elif is_b: self.tag_add("bold", start_idx, end_idx)
+                elif is_u: self.tag_add("underline", start_idx, end_idx)
+                
         self.adjust_height()
 
     def sync_data(self):
         raw_text = self.get("1.0", "end-1c")
-        has_bold = False
-        has_under = False
         
-        for tag in self.tag_names():
-            if tag in ("bold", "bold_underline") and self.tag_ranges(tag): has_bold = True
-            if tag in ("underline", "bold_underline") and self.tag_ranges(tag): has_under = True
+        # If no tags exist at all, save as plain text
+        all_tags = self.tag_names()
+        if "bold" not in all_tags and "underline" not in all_tags and "bold_underline" not in all_tags:
+            self.textvariable.set(raw_text)
+            if hasattr(self, 'on_change') and self.on_change: self.on_change()
+            return
             
-        prefix = ""
-        if has_bold: prefix += "@@B@@"
-        if has_under: prefix += "@@U@@"
+        result = ""
+        is_b = False
+        is_u = False
         
-        self.textvariable.set(prefix + raw_text)
+        for i in range(len(raw_text)):
+            idx = f"1.0+{i}c"
+            tags = self.tag_names(idx)
+            char_b = "bold" in tags or "bold_underline" in tags
+            char_u = "underline" in tags or "bold_underline" in tags
+            
+            if not is_b and char_b: result += "[B]"; is_b = True
+            if is_b and not char_b: result += "[/B]"; is_b = False
+            
+            if not is_u and char_u: result += "[U]"; is_u = True
+            if is_u and not char_u: result += "[/U]"; is_u = False
+            
+            result += raw_text[i]
+            
+        if is_b: result += "[/B]"
+        if is_u: result += "[/U]"
+        
+        self.textvariable.set(result)
         if hasattr(self, 'on_change') and self.on_change: 
             self.on_change()
 

@@ -76,6 +76,17 @@ class SubjectRichText(tk.Text):
         
         self.bind("<MouseWheel>", self.route_scroll_to_canvas)
         # ---------------------------------------------------------------
+        
+        # --- THE FIX: Listen to external changes (like loading a saved invoice) ---
+        self._is_syncing = False
+        if hasattr(self, "textvariable") and self.textvariable:
+            self.textvariable.trace_add("write", self.on_var_changed)
+            
+    def on_var_changed(self, *args):
+        if getattr(self, "_is_syncing", False): return
+        if hasattr(self, "textvariable") and self.textvariable:
+            self.set_text(self.textvariable.get())
+        # --------------------------------------------------------------------------
 
     def route_scroll_to_canvas(self, event):
         widget = self.master
@@ -313,6 +324,9 @@ def build_part_1(parent, state):
         # --- THE FIX: Load Blacklist, Custom Subjects, and Extract! ---
         state.subject_blacklist = []
         state.subject_custom = []
+        state.place_blacklist = []
+        state.place_custom = []
+        
         try:
             with open(os.path.join(root_dir, f"subject_blacklist_{comp_id}.json"), "r") as f:
                 state.subject_blacklist = json.load(f)
@@ -320,6 +334,15 @@ def build_part_1(parent, state):
         try:
             with open(os.path.join(root_dir, f"subject_custom_{comp_id}.json"), "r") as f:
                 state.subject_custom = json.load(f)
+        except: pass
+        
+        try:
+            with open(os.path.join(root_dir, f"place_blacklist_{comp_id}.json"), "r") as f:
+                state.place_blacklist = json.load(f)
+        except: pass
+        try:
+            with open(os.path.join(root_dir, f"place_custom_{comp_id}.json"), "r") as f:
+                state.place_custom = json.load(f)
         except: pass
 
         places_set = set()
@@ -329,12 +352,13 @@ def build_part_1(parent, state):
             p_str = r[1]
             if p_str and "@@SERV@@" in p_str:
                 import re
-                # --- THE FIX: Added 're.DOTALL' so Python safely reads multi-line Subjects! ---
                 m_serv = re.search(r'@@SERV@@(.*?)@@', p_str + "@@", re.DOTALL)
                 if m_serv:
                     parts = m_serv.group(1).split('||')
                     if len(parts) > 1 and parts[1].strip():
-                        places_set.add(parts[1].strip())
+                        clean_place = parts[1].strip()
+                        if clean_place not in state.place_blacklist:
+                            places_set.add(clean_place)
                 
                 m_subj = re.search(r'@@SUBJ@@(.*?)@@', p_str + "@@", re.DOTALL)
                 if m_subj:
@@ -344,11 +368,17 @@ def build_part_1(parent, state):
                         if clean_subj not in state.subject_blacklist:
                             subj_set.add(clean_subj)
             elif p_str and not p_str.startswith("@@"):
-                places_set.add(p_str.strip())
+                clean_place = p_str.strip()
+                if clean_place not in state.place_blacklist:
+                    places_set.add(clean_place)
                 
         for cs in state.subject_custom:
             if cs not in state.subject_blacklist:
                 subj_set.add(cs)
+                
+        for cp in state.place_custom:
+            if cp not in state.place_blacklist:
+                places_set.add(cp)
                 
         state.historical_places = sorted(list(places_set))
         state.historical_subjects = sorted(list(subj_set))
@@ -746,141 +776,264 @@ def build_part_1(parent, state):
     col3_head.pack(anchor="w", fill="x", pady=(0, 5))
     tk.Label(col3_head, text="Invoice Details", font=("Arial", 10, "bold"), bg=theme["card"], fg=theme["sec"]).pack(side="left")
 
-    # --- THE FIX: Inline Editing, Zebra Fill, and Click-Away Drop! ---
-    def open_subject_manager():
+    # --- THE FIX: Manage Suggestions with Tabs (Invoice Safe - No SQL Drops) ---
+    def open_suggestion_manager():
         mgr = tk.Toplevel(state.popup)
-        mgr.title("Subject Clipboard")
+        mgr.title("Manage Suggestions")
         mgr.configure(bg=theme["bg"])
         mgr.transient(state.popup)
         mgr.grab_set()
         
-        window_width = 450
-        x = btn_subj_mgr.winfo_rootx() + btn_subj_mgr.winfo_width() - window_width
-        y = btn_subj_mgr.winfo_rooty() + btn_subj_mgr.winfo_height() + 5
-        mgr.geometry(f"{window_width}x350+{x}+{y}")
+        window_width = 550
+        x = state.popup.winfo_rootx() + (state.popup.winfo_width() // 2) - (window_width // 2)
+        y = state.popup.winfo_rooty() + 100
+        mgr.geometry(f"{window_width}x450+{x}+{y}")
 
-        tk.Label(mgr, text="Manage Saved Subjects (Double-Click to Edit)", font=("Arial", 11, "bold"), bg=theme["bg"], fg=theme["text"]).pack(pady=10)
+        header_f = tk.Frame(mgr, bg=theme["bg"])
+        header_f.pack(fill="x", padx=15, pady=10)
+        tk.Label(header_f, text="Manage Suggestions", font=("Segoe UI", 12, "bold"), bg=theme["bg"], fg=theme["text"]).pack(side="left")
+        tk.Label(mgr, text="(Double-Click or Right-Click an item to edit/delete)", font=("Segoe UI", 9, "italic"), bg=theme["bg"], fg=theme["sec"]).pack(pady=(0, 5))
+
+        style = ttk.Style(mgr)
         
-        list_frame = tk.Frame(mgr, bg=theme["bg"])
-        list_frame.pack(fill="both", expand=True, padx=15, pady=5)
+        # --- THE FIX: Force tabs to respect your custom Dark/Light UI theme ---
+        if os.name == 'nt': style.theme_use('default') 
+        style.configure("SuggestMgr.TNotebook", background=theme["bg"], borderwidth=0)
+        style.configure("SuggestMgr.TNotebook.Tab", font=("Segoe UI", 10, "bold"), padding=[10, 5], background=theme["card"], foreground=theme["text"], borderwidth=0)
+        style.map("SuggestMgr.TNotebook.Tab", background=[("selected", theme["accent_blue"]), ("!selected", theme["card"])], foreground=[("selected", "#ffffff"), ("!selected", theme["text"])])
         
-        scrollbar = ttk.Scrollbar(list_frame)
-        scrollbar.pack(side="right", fill="y")
+        style.configure("ItemMgr.Treeview", font=("Segoe UI", 11), rowheight=28, background=theme["card"], fieldbackground=theme["card"], foreground=theme["text"], borderwidth=0)
+        style.configure("ItemMgr.Treeview.Heading", font=("Segoe UI", 10, "bold"), background=theme["bg"], foreground=theme["text"])
+        style.map("ItemMgr.Treeview", background=[("selected", theme["accent_blue"])], foreground=[("selected", "#ffffff")])
+
+        notebook = ttk.Notebook(mgr, style="SuggestMgr.TNotebook")
+        notebook.pack(fill="both", expand=True, padx=15, pady=5)
         
-        lst = tk.Listbox(list_frame, font=("Arial", 11), bg=theme["card"], fg=theme["text"], yscrollcommand=scrollbar.set, selectbackground=theme["accent_blue"], activestyle="none", highlightthickness=1, highlightbackground=theme["border"])
-        lst.pack(side="left", fill="both", expand=True)
-        scrollbar.config(command=lst.yview)
-        
-        def refresh_list():
-            lst.delete(0, tk.END)
-            for s in state.historical_subjects:
-                lst.insert(tk.END, s.replace("@@B@@", "").replace("@@U@@", ""))
+        def build_tab(tab_name, data_list, blacklist, custom_list, is_subject):
+            tab_frame = tk.Frame(notebook, bg=theme["bg"])
+            notebook.add(tab_frame, text=tab_name)
             
-            # 1. Inject hidden dummy rows to force zebra striping to the bottom
-            while lst.size() < 12:
-                lst.insert(tk.END, "")
+            # --- THE FIX: Pack Buttons FIRST at the bottom so they NEVER get pushed offscreen! ---
+            btn_f = tk.Frame(tab_frame, bg=theme["bg"])
+            btn_f.pack(side="bottom", fill="x", pady=10)
+            
+            btn_bulk_del = tk.Button(btn_f, text="🗑 Delete Selected (0)", bg=theme.get("error", "#ef4444"), fg="#ffffff", font=("Segoe UI", 10, "bold"), relief="flat", cursor="hand2")
+            btn_cancel_bulk = tk.Button(btn_f, text="✖ Cancel Bulk", bg=theme["border"], fg=theme["text"], font=("Segoe UI", 10, "bold"), relief="flat", cursor="hand2")
+            # -------------------------------------------------------------------------------------
+
+            # Pack the list explicitly AFTER the buttons so it fills the remaining space
+            list_frame = tk.Frame(tab_frame, bg=theme["bg"])
+            list_frame.pack(side="top", fill="both", expand=True)
+            
+            scrollbar = ttk.Scrollbar(list_frame)
+            scrollbar.pack(side="right", fill="y")
+            
+            tree = ttk.Treeview(list_frame, columns=("check", "sno", "item"), displaycolumns=("sno", "item"), show="headings", yscrollcommand=scrollbar.set, style="ItemMgr.Treeview")
+            tree.pack(side="left", fill="both", expand=True)
+            scrollbar.config(command=tree.yview)
+            
+            tree.heading("check", text="[ ]")
+            tree.heading("sno", text="SI No.")
+            tree.heading("item", text="Name", anchor="w")
+            
+            tree.column("check", width=40, anchor="center", stretch=False)
+            tree.column("sno", width=60, anchor="center", stretch=False)
+            tree.column("item", width=400, anchor="w", stretch=True)
+            
+            tree.tag_configure("even", background=theme["bg"], foreground=theme["text"])
+            tree.tag_configure("odd", background=theme["card"], foreground=theme["text"])
+            
+            is_bulk_mode = [False]
+            selected_items = set()
+            sorted_keys = []
+            
+            def refresh_list():
+                for i in tree.get_children(): tree.delete(i)
+                nonlocal sorted_keys
+                sorted_keys = sorted(data_list, key=str.lower)
                 
-            for i in range(lst.size()):
-                bg_color = theme["bg"] if i % 2 == 0 else theme["card"]
-                lst.itemconfig(i, bg=bg_color)
+                for idx, item_name in enumerate(sorted_keys):
+                    tag = "even" if idx % 2 == 0 else "odd"
+                    chk = "[✓]" if item_name in selected_items else "[ ]"
+                    tree.insert("", "end", iid=item_name, values=(chk, idx + 1, item_name.replace("@@B@@", "").replace("@@U@@", "")), tags=(tag,))
+                    
+                for i in range(len(sorted_keys), 12):
+                    tag = "even" if i % 2 == 0 else "odd"
+                    tree.insert("", "end", iid=f"dummy_{i}", values=("", "", ""), tags=(tag,))
+                    
+            refresh_list()
+
+            def update_bulk_btn_text():
+                btn_bulk_del.config(text=f"🗑 Delete Selected ({len(selected_items)})")
+
+            def toggle_bulk_mode():
+                if is_bulk_mode[0]:
+                    is_bulk_mode[0] = False
+                    selected_items.clear()
+                    tree["displaycolumns"] = ("sno", "item")
+                    btn_bulk_del.pack_forget()
+                    btn_cancel_bulk.pack_forget()
+                    refresh_list()
+                else:
+                    is_bulk_mode[0] = True
+                    selected_items.clear()
+                    tree["displaycolumns"] = ("check", "sno", "item")
+                    btn_bulk_del.pack(side="left", padx=(0, 10))
+                    btn_cancel_bulk.pack(side="left")
+                    update_bulk_btn_text()
+                    refresh_list()
+
+            btn_cancel_bulk.config(command=toggle_bulk_mode)
+
+            def toggle_select_all(e):
+                if not is_bulk_mode[0]: return
+                region = tree.identify("region", e.x, e.y)
+                col = tree.identify_column(e.x)
+                if region == "heading" and col == "#1":
+                    if len(selected_items) == len(sorted_keys) and len(sorted_keys) > 0:
+                        selected_items.clear()
+                        tree.heading("check", text="[ ]")
+                    else:
+                        selected_items.update(sorted_keys)
+                        tree.heading("check", text="[✓]")
+                    refresh_list()
+                    update_bulk_btn_text()
+
+            def on_row_click(e):
+                region = tree.identify("region", e.x, e.y)
+                if region == "nothing":
+                    tree.selection_remove(tree.selection())
+                    return
+                if region == "cell":
+                    iid = tree.identify_row(e.y)
+                    if not iid or str(iid).startswith("dummy_"):
+                        tree.selection_remove(tree.selection())
+                        return
+                    if is_bulk_mode[0]:
+                        if iid in selected_items: selected_items.remove(iid)
+                        else: selected_items.add(iid)
+                        refresh_list()
+                        update_bulk_btn_text()
+
+            tree.bind("<ButtonRelease-1>", lambda e: toggle_select_all(e) if tree.identify("region", e.x, e.y) == "heading" else on_row_click(e))
+            tab_frame.bind("<Button-1>", lambda e: tree.selection_remove(tree.selection()) if e.widget not in (tree, scrollbar) else None)
+
+            def save_lists():
+                comp_id = getattr(state.view.winfo_toplevel(), "active_company_id", 1)
+                try:
+                    if is_subject:
+                        with open(os.path.join(root_dir, f"subject_blacklist_{comp_id}.json"), "w") as f:
+                            json.dump(blacklist, f)
+                        with open(os.path.join(root_dir, f"subject_custom_{comp_id}.json"), "w") as f:
+                            json.dump(custom_list, f)
+                    else:
+                        with open(os.path.join(root_dir, f"place_blacklist_{comp_id}.json"), "w") as f:
+                            json.dump(blacklist, f)
+                        with open(os.path.join(root_dir, f"place_custom_{comp_id}.json"), "w") as f:
+                            json.dump(custom_list, f)
+                except: pass
+
+            def start_inline_edit(old_name=None):
+                if not old_name:
+                    sel = tree.selection()
+                    if not sel: return
+                    old_name = sel[0]
+                if str(old_name).startswith("dummy_"): return
+                    
+                bbox = tree.bbox(old_name, "item") 
+                if not bbox: return
+                x_pos, y_pos, w_width, h_height = bbox
                 
-        refresh_list()
-
-        # 2. Prevent clicking on the dummy empty rows
-        def enforce_selection(e):
-            sel = lst.curselection()
-            if sel and sel[0] >= len(state.historical_subjects):
-                lst.selection_clear(sel[0])
-        lst.bind("<<ListboxSelect>>", enforce_selection)
-
-        # 3. Clear highlight when clicking empty space or outside
-        def clear_selection(e):
-            if e.widget not in (lst, scrollbar):
-                lst.selection_clear(0, tk.END)
-        mgr.bind("<Button-1>", clear_selection)
-            
-        btn_f = tk.Frame(mgr, bg=theme["bg"])
-        btn_f.pack(fill="x", padx=15, pady=10)
-        
-        def save_lists():
-            comp_id = getattr(state.view.winfo_toplevel(), "active_company_id", 1)
-            try:
-                with open(os.path.join(root_dir, f"subject_blacklist_{comp_id}.json"), "w") as f:
-                    json.dump(state.subject_blacklist, f)
-                with open(os.path.join(root_dir, f"subject_custom_{comp_id}.json"), "w") as f:
-                    json.dump(state.subject_custom, f)
-            except: pass
-
-        # 4. Seamless Inline Editing
-        def start_inline_edit(event=None):
-            sel = lst.curselection()
-            if not sel or sel[0] >= len(state.historical_subjects): return
-            idx = sel[0]
-            
-            bbox = lst.bbox(idx)
-            if not bbox: return
-            x_pos, y_pos, _, h_height = bbox
-            full_width = lst.winfo_width() 
-            
-            # --- THE FIX: Upgraded to a multi-line Text widget with Word Wrap! ---
-            edit_ent = tk.Text(lst, font=("Arial", 11), bg=theme["bg"], fg=theme["text"], insertbackground=theme["text"], highlightthickness=1, highlightcolor=theme["accent_blue"], wrap="word")
-            
-            # Make the edit box 3 rows tall so the wrapped text is fully visible
-            edit_ent.place(x=0, y=y_pos, width=full_width, height=h_height * 3)
-            
-            old_subj = state.historical_subjects[idx]
-            clean_old = old_subj.replace("@@B@@", "").replace("@@U@@", "")
-            edit_ent.insert("1.0", clean_old)
-            edit_ent.focus_set()
-            edit_ent.tag_add("sel", "1.0", "end")
-            
-            def save_edit(e=None):
-                new_subj = edit_ent.get("1.0", "end-1c").strip()
-                if new_subj and new_subj != clean_old:
-                    if old_subj not in state.subject_blacklist:
-                        state.subject_blacklist.append(old_subj)
-                    if old_subj in state.subject_custom:
-                        state.subject_custom.remove(old_subj)
-                    if new_subj not in state.subject_custom:
-                        state.subject_custom.append(new_subj)
+                edit_ent = tk.Text(tree, font=("Segoe UI", 11), bg=theme["bg"], fg=theme["text"], insertbackground=theme["text"], highlightthickness=1, highlightcolor=theme["accent_blue"], wrap="word")
+                edit_ent.place(x=x_pos, y=y_pos, width=w_width, height=max(h_height * 2, 40))
+                
+                clean_old = old_name.replace("@@B@@", "").replace("@@U@@", "")
+                edit_ent.insert("1.0", clean_old)
+                edit_ent.focus_set()
+                edit_ent.tag_add("sel", "1.0", "end")
+                
+                def save_edit(e=None):
+                    new_name = edit_ent.get("1.0", "end-1c").strip()
+                    if new_name and new_name != clean_old:
+                        if old_name not in blacklist: blacklist.append(old_name)
+                        if old_name in custom_list: custom_list.remove(old_name)
+                        if new_name not in custom_list: custom_list.append(new_name)
                         
-                    state.historical_subjects[idx] = new_subj
+                        idx = data_list.index(old_name)
+                        data_list[idx] = new_name
+                        if old_name in selected_items:
+                            selected_items.remove(old_name)
+                            selected_items.add(new_name)
+                        
+                        refresh_list()
+                        save_lists()
+                        
+                    if edit_ent.winfo_exists(): edit_ent.destroy()
+                    return "break"
+                    
+                def cancel_edit(e=None):
+                    if edit_ent.winfo_exists(): edit_ent.destroy()
+
+                # --- THE FIX: Pushed in 4 spaces so it stays inside start_inline_edit! ---
+                edit_ent.bind("<Return>", save_edit)
+                edit_ent.bind("<Escape>", cancel_edit)
+                edit_ent.bind("<FocusOut>", cancel_edit)
+
+            tree.bind("<Double-Button-1>", lambda e: start_inline_edit() if tree.identify("region", e.x, e.y) == "cell" else None)
+
+            def delete_single_item(target_name):
+                import tkinter.messagebox as messagebox
+                if messagebox.askyesno("Confirm Delete", f"Are you sure you want to permanently remove '{target_name}'?", parent=mgr):
+                    if target_name not in blacklist: blacklist.append(target_name)
+                    if target_name in custom_list: custom_list.remove(target_name)
+                    data_list.remove(target_name)
+                    if target_name in selected_items: selected_items.remove(target_name)
                     refresh_list()
                     save_lists()
-                if edit_ent.winfo_exists(): edit_ent.destroy()
-                return "break"  # Prevents the Enter key from adding a newline!
-                
-            def cancel_edit(e=None):
-                if edit_ent.winfo_exists(): edit_ent.destroy()
 
-            edit_ent.bind("<Return>", save_edit)
-            edit_ent.bind("<Escape>", cancel_edit)
-            edit_ent.bind("<FocusOut>", cancel_edit)
-
-        lst.bind("<Double-Button-1>", start_inline_edit)
-
-        def delete_selected():
-            sel = lst.curselection()
-            if sel and sel[0] < len(state.historical_subjects):
-                idx = sel[0]
-                raw_subj = state.historical_subjects[idx]
-                state.historical_subjects.pop(idx)
-                lst.delete(idx)
-                
-                if raw_subj not in state.subject_blacklist:
-                    state.subject_blacklist.append(raw_subj)
-                if raw_subj in state.subject_custom:
-                    state.subject_custom.remove(raw_subj)
+            ctx_menu = tk.Menu(mgr, tearoff=0, font=("Segoe UI", 10), bg=theme["card"], fg=theme["text"], activebackground=theme["accent_blue"], activeforeground="#ffffff")
+            
+            def show_ctx_menu(e):
+                iid = tree.identify_row(e.y)
+                ctx_menu.delete(0, "end")
+                if iid and not str(iid).startswith("dummy_"):
+                    tree.selection_set(iid)
+                    ctx_menu.add_command(label="✏️ Edit", command=lambda: start_inline_edit(iid))
+                    ctx_menu.add_command(label="❌ Delete", foreground=theme.get("error", "#ef4444"), command=lambda: delete_single_item(iid))
+                    ctx_menu.add_separator()
                     
-                refresh_list()
-                save_lists()
+                if not is_bulk_mode[0]:
+                    ctx_menu.add_command(label="☑ Enable Bulk Delete Mode", command=toggle_bulk_mode)
+                else:
+                    ctx_menu.add_command(label="☒ Disable Bulk Delete Mode", command=toggle_bulk_mode)
+                ctx_menu.tk_popup(e.x_root, e.y_root)
+                    
+            tree.bind("<Button-3>", show_ctx_menu)
 
-        # --- THE FIX: Removed the redundant Edit button to clean up the UI! ---
-        tk.Button(btn_f, text="🗑 Delete", bg=theme.get("error", "#ef4444"), fg="#ffffff", font=("Arial", 10, "bold"), relief="flat", cursor="hand2", command=delete_selected).pack(side="left")
-        tk.Button(btn_f, text="Close", bg=theme["border"], fg=theme["text"], font=("Arial", 10, "bold"), relief="flat", cursor="hand2", command=mgr.destroy).pack(side="right")
+            def execute_bulk_delete():
+                if not selected_items: return
+                import tkinter.messagebox as messagebox
+                if messagebox.askyesno("Confirm Bulk Delete", f"Are you sure you want to permanently remove {len(selected_items)} item(s)?", parent=mgr):
+                    for target_name in list(selected_items):
+                        if target_name not in blacklist: blacklist.append(target_name)
+                        if target_name in custom_list: custom_list.remove(target_name)
+                        data_list.remove(target_name)
+                    selected_items.clear()
+                    toggle_bulk_mode()
+                    save_lists()
 
-    btn_subj_mgr = tk.Button(col3_head, text="📋 Manage Subjects", font=("Arial", 10, "bold"), bg=theme["accent_blue"], fg="#ffffff", cursor="hand2", relief="flat", padx=10, pady=2, command=open_subject_manager)
+            btn_bulk_del.config(command=execute_bulk_delete)
+
+        build_tab("Subjects", state.historical_subjects, state.subject_blacklist, state.subject_custom, is_subject=True)
+        build_tab("Places of Service", state.historical_places, state.place_blacklist, state.place_custom, is_subject=False)
+        
+        btn_bot_f = tk.Frame(mgr, bg=theme["bg"])
+        btn_bot_f.pack(fill="x", padx=15, pady=10)
+        tk.Button(btn_bot_f, text="Close", bg=theme["border"], fg=theme["text"], font=("Segoe UI", 10, "bold"), relief="flat", cursor="hand2", command=mgr.destroy).pack(side="right")
+
+    btn_subj_mgr = tk.Button(col3_head, text="📋 Manage Suggestions", font=("Arial", 10, "bold"), bg=theme["accent_blue"], fg="#ffffff", cursor="hand2", relief="flat", padx=10, pady=2, command=open_suggestion_manager)
     btn_subj_mgr.pack(side="right")
+    # ------------------------------------------
     # ------------------------------------------
 
     tk.Label(col3, text="Invoice No.", font=("Arial", 9, "bold"), bg=theme["card"], fg=theme["sec"]).pack(anchor="w", pady=(0,2))
