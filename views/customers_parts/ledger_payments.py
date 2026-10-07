@@ -20,16 +20,26 @@ ROOT_DIR = os.path.dirname(views_dir)
 if ROOT_DIR not in sys.path: 
     sys.path.insert(0, ROOT_DIR)
 
+from views.invoice_parts.portal_popups import compute_proportional_allocations
+
 def open_payment_popup(ledger, pay_type="receive"):
     conn = database.get_connection()
     c = conn.cursor()
     
     if pay_type == "receive":
-        c.execute("SELECT id, invoice_number, balance_due, invoice_date FROM invoices WHERE customer_name=? AND company_id=? AND balance_due > 0 AND is_deleted=0 AND status != 'Draft' ORDER BY invoice_date ASC", (ledger.party_name, ledger.comp_id))
+        c.execute("SELECT id, invoice_number, balance_due, invoice_date, subtotal FROM invoices WHERE customer_name=? AND company_id=? AND balance_due > 0 AND is_deleted=0 AND status != 'Draft' ORDER BY invoice_date ASC", (ledger.party_name, ledger.comp_id))
     else:
-        c.execute("SELECT id, bill_number, balance_due, purchase_date FROM purchases WHERE vendor_name=? AND company_id=? AND balance_due > 0 AND is_deleted=0 AND is_draft=0 ORDER BY purchase_date ASC", (ledger.party_name, ledger.comp_id))
+        c.execute("SELECT id, bill_number, balance_due, purchase_date, subtotal FROM purchases WHERE vendor_name=? AND company_id=? AND balance_due > 0 AND is_deleted=0 AND is_draft=0 ORDER BY purchase_date ASC", (ledger.party_name, ledger.comp_id))
         
-    unpaid_bills = c.fetchall()
+    raw_unpaid_bills = c.fetchall()
+    
+    unpaid_bills = []
+    raw_subtotals = {}
+    for r in raw_unpaid_bills:
+        unpaid_bills.append(r)
+        sub_val = float(r[4] or 0.0) if len(r) > 4 else float(r[2] or 0.0)
+        raw_subtotals[str(r[0])] = sub_val
+        
     conn.close()
 
     p_pop = tk.Toplevel(ledger)
@@ -170,7 +180,7 @@ def open_payment_popup(ledger, pay_type="receive"):
     adv_info_var = tk.StringVar()
     adv_info_lbl = tk.Label(form_f, textvariable=adv_info_var, bg=ledger.colors["bg"], fg=ledger.colors["accent_green"], font=("Segoe UI", 10, "bold"))
 
-    # --- THE FIX: ADD TDS UI CHECKBOX & ENTRY TO LEDGER ---
+    # --- THE FIX: SMART TDS UI WITH PERCENTAGE AUTO-FILL FOR LEDGER ---
     tds_f = tk.Frame(form_f, bg=ledger.colors["bg"])
     tds_f.grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 5))
     
@@ -179,33 +189,37 @@ def open_payment_popup(ledger, pay_type="receive"):
     tds_chk = tk.Checkbutton(tds_f, text=tds_label_text, variable=tds_var, bg=ledger.colors["bg"], fg=ledger.colors["accent_blue"], selectcolor=ledger.colors["bg"], activebackground=ledger.colors["bg"], activeforeground=ledger.colors["accent_blue"], font=("Segoe UI", 10, "bold"), cursor="hand2")
     tds_chk.pack(side="left")
     
+    tds_rate_var = tk.StringVar(value="1%")
+    tds_rate_cb = ttk.Combobox(tds_f, textvariable=tds_rate_var, values=["Auto Balance", "1%", "2%", "5%", "10%", "Custom"], state="readonly", width=12, style="Ledger.TCombobox")
+    
     tds_amt_var = tk.StringVar(value="0")
     tds_ent = tk.Entry(tds_f, textvariable=tds_amt_var, font=("Segoe UI", 11, "bold"), bg=ledger.colors["card"], fg=ledger.colors["text"], insertbackground=ledger.colors["text"], highlightbackground=ledger.colors["border"], highlightcolor=ledger.colors["accent_blue"], highlightthickness=1, bd=0, relief="flat", width=12)
     
+    _is_auto_updating = [False]
+    def on_tds_manual_edit(*args):
+        if not _is_auto_updating[0] and tds_var.get():
+            tds_rate_var.set("Custom")
+            
+    tds_amt_var.trace_add("write", on_tds_manual_edit)
+    tds_rate_var.trace_add("write", lambda *a: check_amount() if apply_var.get() != "Selective Bulk Allocation" else recalculate())
+    
     def toggle_tds(*args):
         if tds_var.get():
-            tds_ent.pack(side="left", padx=10, ipady=3)
-            # Smart Auto-fill logic
-            try:
-                amt = float(p_amt_var.get().strip() or 0)
-                sel = apply_var.get()
-                due = 0.0
-                if "Opening Balance" in sel: due = ob_due
-                elif "Refund" not in sel and "No Pending Actions" not in sel and sel != "Selective Bulk Allocation":
-                    offset = len(apply_opts) - len(unpaid_bills)
-                    sel_idx = apply_opts.index(sel) - offset
-                    due = unpaid_bills[sel_idx][2]
-                rem = due - amt
-                if rem > 0:
-                    tds_amt_var.set(f"{rem:.2f}")
-            except: pass
+            tds_rate_cb.pack(side="left", padx=(10, 5), ipady=2)
+            tds_ent.pack(side="left", padx=5, ipady=3)
         else:
+            tds_rate_cb.pack_forget()
             tds_ent.pack_forget()
+            _is_auto_updating[0] = True
             tds_amt_var.set("0")
-        check_amount()
+            _is_auto_updating[0] = False
+            tds_rate_var.set("1%")
+            
+        if apply_var.get() == "Selective Bulk Allocation": recalculate()
+        else: check_amount()
         
     tds_var.trace_add("write", toggle_tds)
-    tds_amt_var.trace_add("write", lambda *a: check_amount())
+    tds_amt_var.trace_add("write", lambda *a: check_amount() if apply_var.get() != "Selective Bulk Allocation" else recalculate())
     # ------------------------------------------------------
 
     bulk_header_f = tk.Frame(table_f, bg=ledger.colors["card"])
@@ -256,7 +270,6 @@ def open_payment_popup(ledger, pay_type="receive"):
     bulk_tree.column("ghost", width=10, minwidth=10, stretch=True)
 
     def save_bulk_widths():
-        # MATHEMATICAL CLAMP: Prevent 0-width crashes
         new_w = {c: max(30, bulk_tree.column(c, "width")) for c in ("check", "bill", "date", "bal", "alloc")}
         try:
             database.save_ui_setting(f"ledger_bulk_cols_{ledger.comp_id}", json.dumps(new_w))
@@ -270,10 +283,13 @@ def open_payment_popup(ledger, pay_type="receive"):
     bulk_tree.bind("<ButtonRelease-1>", lambda e: p_pop.after(50, save_bulk_widths) if bulk_tree.identify_region(e.x, e.y) == "separator" else None, add="+")
 
     bulk_targets = []
+    raw_balances = {}
     if has_ob_target:
         bulk_targets.append(("OB", "Opening Balance", "Opening", ob_due))
+        raw_balances["OB"] = ob_due
     for r in unpaid_bills:
         bulk_targets.append((str(r[0]), r[1], ledger.fmt_date(r[3]), r[2]))
+        raw_balances[str(r[0])] = r[2]
         
     for idx, t in enumerate(bulk_targets):
         tag = "stripe_even" if idx % 2 == 0 else "stripe_odd"
@@ -285,6 +301,7 @@ def open_payment_popup(ledger, pay_type="receive"):
 
     selected_targets = set()
     allocations = {}
+    preview_allocs_state = {}
 
     def recalculate(*args):
         try: amt = float(p_amt_var.get().strip())
@@ -293,42 +310,82 @@ def open_payment_popup(ledger, pay_type="receive"):
         sel_sum = sum(t[3] for t in bulk_targets if t[0] in selected_targets)
         sel_total_var.set(f"Selected Total: {ledger.fmt(sel_sum)}")
         
-        remaining = amt
+        # --- SMART TDS AUTO-FILL ---
+        if tds_var.get() and not _is_auto_updating[0]:
+            rate_val = tds_rate_var.get()
+            calc_tds = None
+            if rate_val == "Auto Balance":
+                calc_tds = max(0.0, sel_sum - amt)
+            elif rate_val.endswith("%"):
+                pct = float(rate_val.replace("%", "")) / 100.0
+                selected_subtotal = 0.0
+                for t_id in selected_targets:
+                    if t_id == "OB": selected_subtotal += ob_due
+                    else: selected_subtotal += raw_subtotals.get(t_id, 0.0)
+                # Standard Rounding: 0.40 drops, 0.50 pushes to next integer
+                calc_tds = int((selected_subtotal * pct) + 0.5)
+                
+            if calc_tds is not None:
+                try: current_tds_val = float(tds_amt_var.get().strip() or 0.0)
+                except: current_tds_val = 0.0
+                if abs(current_tds_val - calc_tds) > 0.001:
+                    _is_auto_updating[0] = True
+                    tds_amt_var.set(f"{calc_tds:.2f}")
+                    # --- THE FIX: Auto-Fill Cash Amount to Balance Perfectly ---
+                    if rate_val.endswith("%"):
+                        new_amt = max(0.0, sel_sum - calc_tds)
+                        p_amt_var.set(f"{new_amt:.2f}")
+                        amt = new_amt
+                    # -----------------------------------------------------------
+                    _is_auto_updating[0] = False
+        # ---------------------------
+        
+        try: tds_amt = float(tds_amt_var.get().strip()) if tds_var.get() else 0.0
+        except: tds_amt = 0.0
+        
+        eff_amt = amt + tds_amt
+        remaining_unaccounted = sel_sum - eff_amt
+        
+        # Clean label (Removed confusing Remaining balance text)
+        base_lbl = "Customer Deducted TDS" if pay_type == "receive" else "We Deducted TDS"
+        tds_chk.config(text=base_lbl)
+            
+        action_chk.grid_forget()
+        
+        preview_allocs = compute_proportional_allocations(selected_targets, raw_balances, amt, tds_amt, action_var.get(), raw_subtotals)
+        preview_allocs_state.clear()
+        preview_allocs_state.update(preview_allocs)
+        
         for child in bulk_tree.get_children():
-            if "empty" in bulk_tree.item(child, "tags"): continue
+            if "empty" in bulk_tree.item(child, "tags"): continue 
             t_id = child
             
-            due = 0.0
-            for t in bulk_targets:
-                if t[0] == t_id:
-                    due = t[3]
-                    break
-                    
-            if t_id in selected_targets:
-                alloc = min(due, remaining)
-                remaining -= alloc
-            else:
-                alloc = 0.0
-                
+            alloc_info = preview_allocs.get(str(t_id), {"total": 0.0})
+            tot_alloc = alloc_info["total"]
+            
             vals = list(bulk_tree.item(t_id, "values"))
-            vals[4] = ledger.fmt(alloc) if alloc > 0 else "-"
+            vals[4] = ledger.fmt(tot_alloc) if tot_alloc > 0 else "-"
             bulk_tree.item(t_id, values=vals)
-            allocations[t_id] = alloc
+            allocations[t_id] = alloc_info
             
         if apply_var.get() == "Selective Bulk Allocation":
-            action_chk.grid_forget()
             is_wallet = "Wallet Deduction" in p_mode_var.get()
             
             if is_wallet and amt > active_wallet_bal:
                 adv_info_var.set("⚠️ Exceeds Available Wallet Balance!")
                 adv_info_lbl.config(fg=ledger.colors["error"])
-                adv_info_lbl.grid(row=6, column=0, columnspan=2, sticky="w", pady=(10, 8), padx=5)
-            elif remaining > 0:
-                adv_info_var.set(f"⚠️ Overpayment Blocked: {ledger.fmt(remaining)}")
+                adv_info_lbl.grid(row=8, column=0, columnspan=2, sticky="w", pady=(10, 8), padx=5)
+            elif remaining_unaccounted < -0.01:
+                adv_info_var.set(f"⚠️ Overpayment Blocked: {ledger.fmt(abs(remaining_unaccounted))}")
                 adv_info_lbl.config(fg=ledger.colors["error"])
-                adv_info_lbl.grid(row=6, column=0, columnspan=2, sticky="w", pady=(10, 8), padx=5)
+                adv_info_lbl.grid(row=8, column=0, columnspan=2, sticky="w", pady=(10, 8), padx=5)
             else:
                 adv_info_lbl.grid_forget()
+                if 0 <= remaining_unaccounted <= sel_sum and remaining_unaccounted > 0.01 and not is_waive_blocked:
+                    action_chk.config(text=f"☑ Waive remaining {ledger.fmt(remaining_unaccounted)} (Write-Off)")
+                    action_chk.grid(row=7, column=0, columnspan=2, sticky="w", pady=(5, 5), padx=5)
+                else:
+                    action_var.set(False)
 
     def toggle_select_all(e):
         region = bulk_tree.identify("region", e.x, e.y)
@@ -378,8 +435,12 @@ def open_payment_popup(ledger, pay_type="receive"):
             p_mode_cb.config(values=filtered_modes)
             if "Wallet Deduction" in p_mode_var.get():
                 p_mode_var.set("Cash")
+            tds_f.grid_forget()
+            tds_var.set(False)
         else:
             p_mode_cb.config(values=p_mode_opts)
+            # Move TDS UP to Row 6 (Above Waive)
+            tds_f.grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 5))
             
         if sel == "Selective Bulk Allocation":
             center_popup(780, 620)
@@ -396,20 +457,17 @@ def open_payment_popup(ledger, pay_type="receive"):
         try: amt = float(p_amt_var.get().strip())
         except: amt = 0.0
         
-        try: tds_amt = float(tds_amt_var.get().strip()) if tds_var.get() else 0.0
-        except: tds_amt = 0.0
-
         sel = apply_var.get()
         action_chk.grid_forget()
         adv_info_lbl.grid_forget()
         action_var.set(0)
         
-        if "Refund" in sel or "No Pending Actions" in sel or sel == "Selective Bulk Allocation":
+        if "Refund" in sel or "No Pending Actions" in sel:
             tds_f.grid_forget()
             tds_var.set(False)
         else:
-            # Move TDS down to Row 7 to sit comfortably below Waive Off
-            tds_f.grid(row=7, column=0, columnspan=2, sticky="w", pady=(0, 5))
+            # Place TDS ABOVE the Waive box (Row 6)
+            tds_f.grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 5))
 
         if "Refund" in sel or "No Pending Actions" in sel:
             center_popup(pop_w, 380)
@@ -422,23 +480,47 @@ def open_payment_popup(ledger, pay_type="receive"):
         try:
             if "Opening Balance" in sel:
                 due = ob_due
+                sel_subtotal = ob_due
             else:
                 offset = len(apply_opts) - len(unpaid_bills)
                 sel_idx = apply_opts.index(sel) - offset
                 due = unpaid_bills[sel_idx][2]
+                sel_subtotal = raw_subtotals.get(str(unpaid_bills[sel_idx][0]), due)
                 
-            rem_for_tds = due - amt
-            if rem_for_tds <= 0 and tds_var.get():
-                tds_amt_var.set("0")
-                tds_amt = 0.0
+            # --- SMART TDS AUTO-FILL ---
+            if tds_var.get() and not _is_auto_updating[0]:
+                rate_val = tds_rate_var.get()
+                calc_tds = None
+                if rate_val == "Auto Balance":
+                    calc_tds = max(0.0, due - amt)
+                elif rate_val.endswith("%"):
+                    pct = float(rate_val.replace("%", "")) / 100.0
+                    # Standard Rounding: 0.40 drops, 0.50 pushes to next integer
+                    calc_tds = int((sel_subtotal * pct) + 0.5)
+                    
+                if calc_tds is not None:
+                    try: current_tds_val = float(tds_amt_var.get().strip() or 0.0)
+                    except: current_tds_val = 0.0
+                    if abs(current_tds_val - calc_tds) > 0.001:
+                        _is_auto_updating[0] = True
+                        tds_amt_var.set(f"{calc_tds:.2f}")
+                        # --- THE FIX: Auto-Fill Cash Amount to Balance Perfectly ---
+                        if rate_val.endswith("%"):
+                            new_amt = max(0.0, due - calc_tds)
+                            p_amt_var.set(f"{new_amt:.2f}")
+                            amt = new_amt
+                        # -----------------------------------------------------------
+                        _is_auto_updating[0] = False
+            # ---------------------------
+            
+            try: tds_amt = float(tds_amt_var.get().strip()) if tds_var.get() else 0.0
+            except: tds_amt = 0.0
                 
             eff_amt = amt + tds_amt
             
+            # Clean label (Removed confusing Remaining balance text)
             base_lbl = "Customer Deducted TDS" if pay_type == "receive" else "We Deducted TDS"
-            if rem_for_tds > 0:
-                tds_chk.config(text=f"{base_lbl} (Remaining: {ledger.fmt(rem_for_tds)})")
-            else:
-                tds_chk.config(text=base_lbl)
+            tds_chk.config(text=base_lbl)
                 
             is_wallet = "Wallet Deduction" in p_mode_var.get()
             
@@ -446,17 +528,17 @@ def open_payment_popup(ledger, pay_type="receive"):
                 if amt > active_wallet_bal:
                     adv_info_var.set("⚠️ Exceeds Available Wallet Balance!")
                     adv_info_lbl.config(fg=ledger.colors["error"])
-                    adv_info_lbl.grid(row=6, column=0, columnspan=2, sticky="w", pady=(5, 5), padx=5)
+                    adv_info_lbl.grid(row=8, column=0, columnspan=2, sticky="w", pady=(5, 5), padx=5)
                     center_popup(pop_w, 440)
                 elif eff_amt > due:
                     adv_info_var.set("⚠️ Cannot overpay bill using Wallet/TDS.")
                     adv_info_lbl.config(fg=ledger.colors["error"])
-                    adv_info_lbl.grid(row=6, column=0, columnspan=2, sticky="w", pady=(5, 5), padx=5)
+                    adv_info_lbl.grid(row=8, column=0, columnspan=2, sticky="w", pady=(5, 5), padx=5)
                     center_popup(pop_w, 440)
                 elif 0 <= eff_amt < due and not is_waive_blocked:
                     diff = due - eff_amt
                     action_chk.config(text=f"☑ Waive remaining {ledger.fmt(diff)} (Write-Off)")
-                    action_chk.grid(row=6, column=0, columnspan=2, sticky="w", pady=(5, 5), padx=5)
+                    action_chk.grid(row=7, column=0, columnspan=2, sticky="w", pady=(5, 5), padx=5)
                     center_popup(pop_w, 440)
                 else:
                     center_popup(pop_w, 400)
@@ -464,13 +546,13 @@ def open_payment_popup(ledger, pay_type="receive"):
                 if 0 <= eff_amt < due and not is_waive_blocked:
                     diff = due - eff_amt
                     action_chk.config(text=f"☑ Waive remaining {ledger.fmt(diff)} (Write-Off)")
-                    action_chk.grid(row=6, column=0, columnspan=2, sticky="w", pady=(5, 5), padx=5)
+                    action_chk.grid(row=7, column=0, columnspan=2, sticky="w", pady=(5, 5), padx=5)
                     center_popup(pop_w, 440) 
                 elif eff_amt > due:
                     diff = eff_amt - due
                     adv_info_var.set(f"To Advance Wallet: {ledger.fmt(diff)}")
                     adv_info_lbl.config(fg=ledger.colors["accent_green"])
-                    adv_info_lbl.grid(row=6, column=0, columnspan=2, sticky="w", pady=(5, 5), padx=5)
+                    adv_info_lbl.grid(row=8, column=0, columnspan=2, sticky="w", pady=(5, 5), padx=5)
                     center_popup(pop_w, 440)
                 else:
                     center_popup(pop_w, 400) 
@@ -512,7 +594,7 @@ def open_payment_popup(ledger, pay_type="receive"):
         is_refund = "Refund" in sel_apply
         is_wallet = "Wallet Deduction" in p_mode_var.get()
         
-        if "Refund" in sel_apply or "No Pending Actions" in sel_apply or sel_apply == "Selective Bulk Allocation":
+        if "Refund" in sel_apply or "No Pending Actions" in sel_apply:
             tds_amt = 0.0 # Guard against stray TDS data
         
         if is_refund:
@@ -635,19 +717,28 @@ def open_payment_popup(ledger, pay_type="receive"):
             actual_tds = 0.0
             remaining_funds = pay_amt
             breakdown_text = []
+            breakdown_tds = []
+            breakdown_woff = []
             total_write_off = 0.0
             ob_paid_now = 0.0
 
             if not single_invoice:
                 for t in bulk_targets:
                     t_id = t[0]
-                    alloc = allocations.get(t_id, 0.0)
-                    if alloc > 0:
+                    info = preview_allocs_state.get(str(t_id), {"cash": 0.0, "tds": 0.0, "woff": 0.0})
+                    alloc_cash = info["cash"]
+                    alloc_tds = info["tds"]
+                    alloc_woff = info["woff"]
+                    
+                    if alloc_cash > 0 or alloc_tds > 0 or alloc_woff > 0:
                         if t_id == "OB":
-                            ob_paid_now = alloc
-                            remaining_funds -= alloc
-                            breakdown_text.append(f"Opening Balance ({ledger.fmt(alloc)})")
-                            actual_applied += alloc
+                            ob_paid_now = alloc_cash + alloc_tds + alloc_woff
+                            actual_applied += alloc_cash
+                            actual_tds += alloc_tds
+                            total_write_off += alloc_woff
+                            if alloc_cash > 0: breakdown_text.append(f"Opening Balance ({ledger.fmt(alloc_cash)})")
+                            if alloc_tds > 0: breakdown_tds.append(f"Opening Balance ({ledger.fmt(alloc_tds)})")
+                            if alloc_woff > 0: breakdown_woff.append(f"Opening Balance ({ledger.fmt(alloc_woff)})")
                         else:
                             inv_id = int(t_id)
                             inv_num = t[1]
@@ -663,16 +754,23 @@ def open_payment_popup(ledger, pay_type="receive"):
 
                             action_log["invoices_changed"].append((inv_id, curr_paid, curr_due, curr_status, curr_woff)) 
                             
-                            new_paid = (curr_paid or 0) + alloc
-                            new_due = max(0, curr_due - alloc)
+                            new_paid = (curr_paid or 0) + alloc_cash + alloc_tds
+                            new_woff = curr_woff + alloc_woff
+                            new_due = max(0, curr_due - (alloc_cash + alloc_tds + alloc_woff))
                             new_status = "Paid" if new_due <= 0.01 else "Partial"
                             
-                            if has_woff: c.execute(f"UPDATE {table} SET amount_paid=?, balance_due=?, status=?, written_off=? WHERE id=? AND company_id=?", (new_paid, new_due, new_status, curr_woff, inv_id, ledger.comp_id))
+                            if has_woff: c.execute(f"UPDATE {table} SET amount_paid=?, balance_due=?, status=?, written_off=? WHERE id=? AND company_id=?", (new_paid, new_due, new_status, new_woff, inv_id, ledger.comp_id))
                             else: c.execute(f"UPDATE {table} SET amount_paid=?, balance_due=?, status=? WHERE id=? AND company_id=?", (new_paid, new_due, new_status, inv_id, ledger.comp_id))
                             
-                            remaining_funds -= alloc
-                            breakdown_text.append(f"{inv_num} ({ledger.fmt(alloc)})")
-                            actual_applied += alloc
+                            actual_applied += alloc_cash
+                            actual_tds += alloc_tds
+                            total_write_off += alloc_woff
+                            
+                            if alloc_cash > 0: breakdown_text.append(f"{inv_num} ({ledger.fmt(alloc_cash)})")
+                            if alloc_tds > 0: breakdown_tds.append(f"{inv_num} ({ledger.fmt(alloc_tds)})")
+                            if alloc_woff > 0: breakdown_woff.append(f"{inv_num} ({ledger.fmt(alloc_woff)})")
+                
+                remaining_funds = 0.0 # Handled by the helper math
             else:
                 actual_applied = min(pay_amt, total_due_all)
                 remaining_after_cash = max(0.0, total_due_all - actual_applied)
