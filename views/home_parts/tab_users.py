@@ -361,7 +361,7 @@ def open_user_form_popup(parent_win, theme, on_save_callback, edit_user_id=None)
     if not all_companies:
         tk.Label(comp_inner, text="No companies created yet.", font=("Segoe UI", 9), bg=bg_col, fg=sec_col).pack(pady=10, anchor="nw")
 
-    # --- COLUMN 2: ALLOWED SIDEBAR TABS ---
+    # --- COLUMN 2: ALLOWED SIDEBAR TABS (NOW SUPPORTS PER-COMPANY OVERRIDES) ---
     side_box = tk.Frame(matrix_split, bg=bg_col, padx=12, pady=12, highlightbackground=border_col, highlightthickness=1)
     side_box.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
@@ -370,31 +370,72 @@ def open_user_form_popup(parent_win, theme, on_save_callback, edit_user_id=None)
 
     sidebar_vars = {}
 
+    title_f = tk.Frame(side_hdr, bg=bg_col)
+    title_f.pack(fill="x")
+
+    # --- THE FIX: Add Combobox state map to intercept per-company UI settings ---
+    ctx_map = {"🌐 Global Default (All)": "global"}
+    for c_row in all_companies:
+        ctx_map[f"🏢 {c_row[1]} (ID: {c_row[0]})"] = str(c_row[0])
+
+    ctx_var = tk.StringVar(value="🌐 Global Default (All)")
+    previous_ctx = ["global"]
+    comp_sidebars = saved_perms.get("company_sidebars", {}) if isinstance(saved_perms.get("company_sidebars"), dict) else {}
+
+    def save_sidebar_context(ctx):
+        if is_master_admin: return
+        selected = [s for s, v in sidebar_vars.items() if v.get() == 1 or s == "Home"]
+        if ctx == "global":
+            saved_perms["sidebars"] = selected
+        else:
+            comp_sidebars[str(ctx)] = selected
+
+    def load_sidebar_context(ctx):
+        if is_master_admin: return
+        active_list = saved_perms.get("sidebars", "all") if ctx == "global" else comp_sidebars.get(str(ctx), saved_perms.get("sidebars", "all"))
+        for s_name in ALL_SIDEBAR_ITEMS:
+            if s_name == "Home":
+                sidebar_vars[s_name].set(1)
+            else:
+                sidebar_vars[s_name].set(1 if (active_list == "all" or s_name in active_list) else 0)
+        render_rules_for_tab(active_rule_tab[0])
+
+    def on_ctx_change(event=None):
+        save_sidebar_context(previous_ctx[0])
+        new_ctx = ctx_map[ctx_var.get()]
+        load_sidebar_context(new_ctx)
+        previous_ctx[0] = new_ctx
+
     def toggle_all_sidebars(state=True):
-        if is_master_admin:
-            return
+        if is_master_admin: return
         for k, v in sidebar_vars.items():
             v.set(1 if (k == "Home" or state) else 0)
         render_rules_for_tab(active_rule_tab[0])
+        save_sidebar_context(previous_ctx[0])
+    # -----------------------------------------------------------------------------
 
-    # Pack All/None buttons FIRST so they never get squashed by the label
     if not is_master_admin:
         tk.Button(
-            side_hdr, text="None", font=("Segoe UI", 8, "bold"),
+            title_f, text="None", font=("Segoe UI", 8, "bold"),
             bg=card_bg, fg=text_col, activebackground=border_col, activeforeground="#ffffff",
             relief="solid", bd=1, cursor="hand2", padx=10, pady=2,
             command=lambda: toggle_all_sidebars(False)
         ).pack(side="right", padx=(6, 0))
         tk.Button(
-            side_hdr, text="All", font=("Segoe UI", 8, "bold"),
+            title_f, text="All", font=("Segoe UI", 8, "bold"),
             bg=accent_blue, fg="#ffffff", activebackground=accent_blue, activeforeground="#ffffff",
             relief="flat", bd=0, cursor="hand2", padx=12, pady=3,
             command=lambda: toggle_all_sidebars(True)
         ).pack(side="right")
 
-    tk.Label(side_hdr, text="📑 Sidebar Tabs", font=("Segoe UI", 10, "bold"), bg=bg_col, fg=text_col).pack(side="left")
+    tk.Label(title_f, text="📑 Sidebar Tabs", font=("Segoe UI", 10, "bold"), bg=bg_col, fg=text_col).pack(side="left")
 
-    tk.Frame(side_box, height=1, bg=border_col).pack(fill="x", pady=(0, 6))
+    ctx_cb = ttk.Combobox(side_hdr, textvariable=ctx_var, values=list(ctx_map.keys()), state="readonly", font=("Segoe UI", 9), style="Popup.TCombobox")
+    if not is_master_admin:
+        ctx_cb.pack(fill="x", pady=(8, 0))
+        ctx_cb.bind("<<ComboboxSelected>>", on_ctx_change)
+
+    tk.Frame(side_box, height=1, bg=border_col).pack(fill="x", pady=(8 if not is_master_admin else 0, 6))
 
     side_scroll_area = tk.Frame(side_box, bg=bg_col)
     side_scroll_area.pack(fill="both", expand=True)
@@ -417,6 +458,7 @@ def open_user_form_popup(parent_win, theme, on_save_callback, edit_user_id=None)
     inv_max_past_edits_var = tk.StringVar(value=str(saved_inv_rules.get("max_past_edits", 1)))
     inv_limit_edits_var = tk.IntVar(value=1 if saved_inv_rules.get("limit_edits", False) else 0)
     inv_max_edits_var = tk.StringVar(value=str(saved_inv_rules.get("max_edits", 2)))
+    inv_hide_financials_var = tk.IntVar(value=1 if saved_inv_rules.get("hide_financials", False) else 0)
 
     saved_party_rules = saved_perms.get("party_rules", {}) if isinstance(saved_perms.get("party_rules"), dict) else {}
     party_lock_ob_var = tk.IntVar(value=1 if saved_party_rules.get("lock_opening_balance", False) else 0)
@@ -438,6 +480,7 @@ def open_user_form_popup(parent_win, theme, on_save_callback, edit_user_id=None)
     purch_limit_edits_var = tk.IntVar(value=1 if saved_purch_rules.get("limit_edits", False) else 0)
     purch_max_edits_var = tk.StringVar(value=str(saved_purch_rules.get("max_edits", 2)))
     purch_block_del_var = tk.IntVar(value=1 if saved_purch_rules.get("block_delete", False) else 0)
+    purch_hide_financials_var = tk.IntVar(value=1 if saved_purch_rules.get("hide_financials", False) else 0)
 
     saved_cat_rules = saved_perms.get("catalog_rules", {}) if isinstance(saved_perms.get("catalog_rules"), dict) else {}
     cat_lock_edit_var = tk.IntVar(value=1 if saved_cat_rules.get("lock_edit", False) else 0)
@@ -562,6 +605,13 @@ def open_user_form_popup(parent_win, theme, on_save_callback, edit_user_id=None)
                 insertbackground=text_col, relief="solid", bd=1
             ).pack(side="left", padx=6, ipady=1)
             tk.Label(spin_row, text="/ day", font=("Segoe UI", 8), bg=bg_col, fg=sec_col).pack(side="left")
+
+            tk.Checkbutton(
+                rules_body, text="Hide Financial Totals",
+                variable=inv_hide_financials_var, font=("Segoe UI", 9, "bold"),
+                bg=bg_col, fg=text_col, selectcolor=card_bg, activebackground=bg_col, activeforeground=text_col, 
+                anchor="w", justify="left", cursor="hand2", wraplength=200
+            ).pack(fill="x", pady=(2, 8), anchor="w")
 
             # Rule 3: Lock Past Days' Payment Deletions
             tk.Checkbutton(
@@ -731,6 +781,13 @@ def open_user_form_popup(parent_win, theme, on_save_callback, edit_user_id=None)
                 bg=bg_col, fg="#ef4444", selectcolor=card_bg,
                 activebackground=bg_col, activeforeground="#ef4444",
                 anchor="w", justify="left", cursor="hand2", wraplength=210
+            ).pack(fill="x", pady=(2, 8), anchor="w")
+
+            tk.Checkbutton(
+                rules_body, text="Hide Financial Totals",
+                variable=purch_hide_financials_var, font=("Segoe UI", 9, "bold"),
+                bg=bg_col, fg=text_col, selectcolor=card_bg, activebackground=bg_col, activeforeground=text_col, 
+                anchor="w", justify="left", cursor="hand2", wraplength=200
             ).pack(fill="x", pady=(2, 8), anchor="w")
 
             # Rule 4: Lock Past Payment Deletions
@@ -1006,6 +1063,8 @@ def open_user_form_popup(parent_win, theme, on_save_callback, edit_user_id=None)
             for k, v in sidebar_vars.items():
                 v.set(1 if k in staff_tabs else 0)
         render_rules_for_tab(active_rule_tab[0])
+        # Auto-save changes to the active context combobox
+        save_sidebar_context(previous_ctx[0])
 
     if not is_edit:
         apply_role_preset("Manager")
@@ -1035,14 +1094,19 @@ def open_user_form_popup(parent_win, theme, on_save_callback, edit_user_id=None)
             return
 
         selected_comps = [cid for cid, v in comp_vars.items() if v.get() == 1]
-        selected_sides = [sname for sname, v in sidebar_vars.items() if v.get() == 1 or sname == "Home"]
+        
+        # --- THE FIX: Ensure latest context dropdown changes are saved in the dictionary natively ---
+        if not is_master_admin:
+            save_sidebar_context(previous_ctx[0])
+        global_sidebars = saved_perms.get("sidebars", "all")
 
         if not is_master_admin and all_companies and not selected_comps:
             if not messagebox.askyesno("No Company Selected", "You haven't ticked any company for this user. They won't see any companies on the Home screen.\n\nSave anyway?", parent=pop):
                 return
 
-        if not is_master_admin and len(selected_sides) <= 1:
-            if not messagebox.askyesno("No Sidebar Tabs", "Only 'Home' is ticked. This user won't see any tabs inside a company.\n\nSave anyway?", parent=pop):
+        # Simple verification using current globally checked sidebars if active config is empty
+        if not is_master_admin and global_sidebars != "all" and len(global_sidebars) <= 1:
+            if not messagebox.askyesno("No Sidebar Tabs", "Only 'Home' is currently enabled in global tabs.\n\nSave anyway?", parent=pop):
                 return
 
         try:
@@ -1077,13 +1141,15 @@ def open_user_form_popup(parent_win, theme, on_save_callback, edit_user_id=None)
 
         perms_dict = saved_perms if (viewer_role != "Admin" and is_edit) else {
             "companies": "all" if (is_edit and str(edit_user_id) == "1") else selected_comps,
-            "sidebars": "all" if (is_edit and str(edit_user_id) == "1") else selected_sides,
+            "sidebars": "all" if (is_edit and str(edit_user_id) == "1") else global_sidebars,
+            "company_sidebars": {} if (is_edit and str(edit_user_id) == "1") else comp_sidebars,
             "invoice_rules": {} if (is_edit and str(edit_user_id) == "1") else {
                 "same_day_only": bool(inv_same_day_var.get() == 1),
                 "max_past_edits": clean_max_past_edits,
                 "limit_edits": bool(inv_limit_edits_var.get() == 1),
                 "max_edits": clean_max_edits,
-                "lock_past_payments": bool(inv_lock_past_pay_var.get() == 1)
+                "lock_past_payments": bool(inv_lock_past_pay_var.get() == 1),
+                "hide_financials": bool(inv_hide_financials_var.get() == 1)
             },
             "party_rules": {} if (is_edit and str(edit_user_id) == "1") else {
                 "lock_opening_balance": bool(party_lock_ob_var.get() == 1),
@@ -1102,7 +1168,8 @@ def open_user_form_popup(parent_win, theme, on_save_callback, edit_user_id=None)
                 "max_past_edits": clean_purch_past_edits,
                 "limit_edits": bool(purch_limit_edits_var.get() == 1),
                 "max_edits": clean_purch_max_edits,
-                "block_delete": bool(purch_block_del_var.get() == 1)
+                "block_delete": bool(purch_block_del_var.get() == 1),
+                "hide_financials": bool(purch_hide_financials_var.get() == 1)
             },
             "catalog_rules": {} if (is_edit and str(edit_user_id) == "1") else {
                 "lock_edit": bool(cat_lock_edit_var.get() == 1),

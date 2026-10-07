@@ -42,7 +42,7 @@ def prompt_company_pin(home_view, cid, correct_pin, action="login", target_tab="
                 
                 home_view.load_companies()
                 home_view.app.update_idletasks()
-                home_view.app.after(15, lambda: home_view.app.switch_view(target_tab))
+                home_view.app.after(15, lambda: home_view.app.switch_view(home_view.app.pending_sidebar_tab))
                 # -------------------------------------------------------------
             elif action == "edit":
                 from views.home_parts.company_forms import open_edit_popup

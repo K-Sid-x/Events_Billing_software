@@ -234,10 +234,21 @@ class CompanyGridManager:
             if isinstance(allowed_comps, list) and int(cid) not in {int(x) for x in allowed_comps}:
                 messagebox.showerror("Access Denied", "You do not have permission to access this company.", parent=self.home)
                 return "break"
-            allowed_tabs = perms.get("sidebars", "all")
+            
+            # Use per-company overrides if available
+            comp_sidebars = perms.get("company_sidebars", {})
+            if str(cid) in comp_sidebars:
+                allowed_tabs = comp_sidebars[str(cid)]
+            else:
+                allowed_tabs = perms.get("sidebars", "all")
+                
             if isinstance(allowed_tabs, list) and target_tab not in allowed_tabs:
-                non_home = [t for t in allowed_tabs if t != "Home"]
-                target_tab = non_home[0] if non_home else "Home"
+                fallback = None
+                for c in ["Dashboard", "Parties", "Invoices", "Purchases", "Catalog", "Stock", "Expenses", "Employees", "Labours", "Settings"]:
+                    if c in allowed_tabs:
+                        fallback = c
+                        break
+                target_tab = fallback if fallback else "Home"
 
         if pin and str(self.app.active_company_id) != str(cid):
             prompt_company_pin(self.home, cid, pin, action="login", target_tab=target_tab)
@@ -251,7 +262,7 @@ class CompanyGridManager:
             self.app.event_generate("<<CompanyChanged>>")
             
             self.home.update_idletasks()
-            self.app.after(15, lambda: self.app.switch_view(target_tab))
+            self.app.after(15, lambda: self.app.switch_view(self.app.pending_sidebar_tab))
 
     def edit_company(self, comp_id, comp_pin):
         if getattr(self.app, "current_role", "") != "Admin":
