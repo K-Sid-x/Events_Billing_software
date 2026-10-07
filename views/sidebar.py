@@ -179,6 +179,24 @@ class Sidebar(tk.Frame):
         try:
             app = self.winfo_toplevel()
             tab = getattr(app, "pending_sidebar_tab", None)
+            
+            # --- THE FIX: Smart Fallback if the requested tab is locked/hidden ---
+            if tab and hasattr(self, "current_visible_tabs") and tab not in self.current_visible_tabs:
+                fallback = None
+                for c in ["Dashboard", "Parties", "Invoices", "Purchases", "Catalog", "Stock", "Expenses", "Employees", "Labours", "Settings"]:
+                    if c in self.current_visible_tabs:
+                        fallback = c
+                        break
+                if not fallback and len(self.current_visible_tabs) > 1:
+                    fallback = self.current_visible_tabs[1]
+                elif not fallback:
+                    fallback = "Home"
+                    
+                tab = fallback
+                app.pending_sidebar_tab = tab
+                self.after(10, lambda: self.on_click(tab))
+            # ---------------------------------------------------------------------
+            
             if tab:
                 self.sync_active_button(tab)
         except: pass
@@ -286,16 +304,23 @@ class Sidebar(tk.Frame):
         for item in self.nav_items:
             self.containers[item].pack_forget()
             
-        # --- THE FIX: Check Logged-In User's Sidebar Access Permissions ---
+        # --- THE FIX: Check Logged-In User's Sidebar Access Permissions (Per-Company Support) ---
         allowed_sidebars = "all"
         try:
             uid = getattr(app, "current_user_id", 1)
             if str(uid) != "1":
                 perms = database.get_user_permissions(uid)
-                allowed_sidebars = perms.get("sidebars", "all")
+                comp_sidebars = perms.get("company_sidebars", {})
+                
+                # Intercept logic for company specific tabs
+                if cid and str(cid) in comp_sidebars:
+                    allowed_sidebars = comp_sidebars[str(cid)]
+                else:
+                    allowed_sidebars = perms.get("sidebars", "all")
         except Exception:
             allowed_sidebars = "all"
 
+        self.current_visible_tabs = []
         for item in self.nav_items:
             should_show = True
             if item == "GST Report" and gst_toggle == 0: should_show = False
@@ -305,6 +330,7 @@ class Sidebar(tk.Frame):
             
             if should_show:
                 self.containers[item].pack(fill="x", pady=0)
+                self.current_visible_tabs.append(item)
 
         self.update_idletasks()
         

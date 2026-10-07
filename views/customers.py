@@ -158,19 +158,31 @@ class CustomersView(tk.Frame):
         search_entry = tk.Entry(action_bar, textvariable=self.search_var, font=("Segoe UI", 11), width=30, bg=self.colors["bg"], fg=self.colors["text"], insertbackground=self.colors["text"], highlightbackground=self.colors["border"], highlightthickness=1)
         search_entry.pack(side="left", ipady=4)
         search_entry.insert(0, "Search Parties...")
+        
+        def force_clear_search():
+            self.search_var.set("Search Parties...")
+            self.focus_set()
+            self.current_page = 1
+            self.tree.yview_moveto(0)
+            self.load_data()
+
+        btn_clear = tk.Button(action_bar, text="✖", font=("Arial", 10, "bold"), bg=self.colors["card"], fg=self.colors["error"], relief="flat", cursor="hand2", command=force_clear_search)
+        btn_clear.pack(side="left", padx=(5, 0), ipady=3, ipadx=5)
+        add_hover(btn_clear, self.colors["card"], self.colors["border"])
+
         search_entry.bind("<FocusIn>", lambda args: search_entry.delete('0', 'end') if search_entry.get() == 'Search Parties...' else None)
         search_entry.bind("<FocusOut>", lambda args: search_entry.insert(0, 'Search Parties...') if not search_entry.get() else None)
-        self.search_var.trace_add("write", lambda *args: [self.tree.yview_moveto(0), self.load_data()] if search_entry.get() != 'Search Parties...' else None)
+        self.search_var.trace_add("write", lambda *args: [setattr(self, 'current_page', 1), self.tree.yview_moveto(0), self.load_data()] if search_entry.get() != 'Search Parties...' else None)
         enable_copy_paste(search_entry) 
 
         self.filter_var = tk.StringVar(value="Alphabetical (A-Z)")
         filter_opts = ["Alphabetical (A-Z)", "Receivables (They Owe You)", "Payables (You Owe Them)", "Highest Balance", "Lowest Balance"]
         self.filter_combo = ttk.Combobox(action_bar, textvariable=self.filter_var, values=filter_opts, state="readonly", width=22, font=("Segoe UI", 10), style="Theme.TCombobox", cursor="hand2")
         self.filter_combo.pack(side="left", padx=(15, 0), ipady=3)
-        self.filter_combo.bind("<<ComboboxSelected>>", lambda e: [self.tree.yview_moveto(0), self.load_data()])
+        self.filter_combo.bind("<<ComboboxSelected>>", lambda e: [setattr(self, 'current_page', 1), self.tree.yview_moveto(0), self.load_data()])
 
         self.hide_settled_var = tk.BooleanVar(value=False)
-        chk_hide = tk.Checkbutton(action_bar, text="Hide Settled (₹0.00)", variable=self.hide_settled_var, command=lambda: [self.tree.yview_moveto(0), self.load_data()], bg=self.colors["card"], fg=self.colors["text"], selectcolor=self.colors["bg"], activebackground=self.colors["card"], activeforeground=self.colors["text"], cursor="hand2", font=("Segoe UI", 10, "bold"))
+        chk_hide = tk.Checkbutton(action_bar, text="Hide Settled (₹0.00)", variable=self.hide_settled_var, command=lambda: [setattr(self, 'current_page', 1), self.tree.yview_moveto(0), self.load_data()], bg=self.colors["card"], fg=self.colors["text"], selectcolor=self.colors["bg"], activebackground=self.colors["card"], activeforeground=self.colors["text"], cursor="hand2", font=("Segoe UI", 10, "bold"))
         chk_hide.pack(side="left", padx=(15, 0))
 
         # --- THE FIX: Save the Add Party button to 'self' so we can hide/show it ---
@@ -271,17 +283,51 @@ class CustomersView(tk.Frame):
         
         # --- THE FIX: Buttery Smooth X/Y Scrolling ---
         def _fast_scroll(event, direction):
-            delta = -1 * (event.delta / 120) if os.name == 'nt' else -1 * event.delta
-            if direction == "y":
-                self.tree.yview_moveto(self.tree.yview()[0] + (delta * 0.008))
-            else:
-                self.tree.xview_moveto(self.tree.xview()[0] + (delta * 0.02))
-                
+            try:
+                delta = -1 * (event.delta / 120) if os.name == 'nt' else -1 * event.delta
+                if direction == "y":
+                    self.tree.yview_moveto(float(self.tree.yview()[0]) + (delta * 0.008))
+                else:
+                    self.tree.xview_moveto(float(self.tree.xview()[0]) + (delta * 0.02))
+            except: pass
+
         self.tree.bind("<MouseWheel>", lambda e: _fast_scroll(e, "y"))
         self.tree.bind("<Shift-MouseWheel>", lambda e: _fast_scroll(e, "x"))
         # ---------------------------------------------
+
+        # --- THE FIX: ADDING PAGINATION UI & STATE ---
+        self.current_page = 1
+        self.items_per_page = 50
+        self.total_pages = 1
+
+        # Attached to main_container so it doesn't get pushed off-screen!
+        self.pagination_frame = tk.Frame(main_container, bg=self.colors["bg"])
+        self.pagination_frame.pack(side="bottom", fill="x", pady=(5, 10))
+        
+        table_frame.pack_forget()
+        table_frame.pack(side="top", fill="both", expand=True)
+
+        self.btn_prev = tk.Button(self.pagination_frame, text="< Previous", font=("Segoe UI", 10, "bold"), bg=self.colors["bg"], fg=self.colors["text_sec"], relief="flat", cursor="hand2", command=self.prev_page)
+        self.btn_prev.pack(side="left", expand=True, anchor="e", padx=10)
+
+        self.lbl_page = tk.Label(self.pagination_frame, text="Page 1 of 1", font=("Segoe UI", 10, "bold"), bg=self.colors["bg"], fg=self.colors["text"])
+        self.lbl_page.pack(side="left", expand=False, anchor="center")
+
+        self.btn_next = tk.Button(self.pagination_frame, text="Next >", font=("Segoe UI", 10, "bold"), bg=self.colors["card"], fg=self.colors["text"], relief="solid", bd=1, cursor="hand2", command=self.next_page, padx=10, pady=3)
+        self.btn_next.pack(side="left", expand=True, anchor="w", padx=10)
+        # ---------------------------------------------
         
         self.load_data()
+
+    def prev_page(self):
+        if self.current_page > 1:
+            self.current_page -= 1
+            self.load_data()
+
+    def next_page(self):
+        if self.current_page < getattr(self, 'total_pages', 1):
+            self.current_page += 1
+            self.load_data()
 
     def show_export_menu(self):
         menu = tk.Menu(self, tearoff=0, font=("Segoe UI", 10), bg=self.colors["card"], fg=self.colors["text"], activebackground=self.colors["accent_blue"])
@@ -535,6 +581,21 @@ class CustomersView(tk.Frame):
             is_admin = (getattr(self.app, "current_role", "Admin") == "Admin")
             menu = tk.Menu(self, tearoff=0, font=("Segoe UI", 10), bg=self.colors["card"], fg=self.colors["text"], activebackground=self.colors["accent_blue"])
             menu.add_command(label="✏️ Edit Party", command=lambda: open_form(self, row_id))
+            
+            if is_admin:
+                conn = database.get_connection()
+                c = conn.cursor()
+                c.execute("SELECT address FROM customers WHERE id=?", (row_id,))
+                addr_raw = c.fetchone()[0]
+                conn.close()
+                is_hidden = False
+                if addr_raw and str(addr_raw).startswith("{"):
+                    try: is_hidden = json.loads(addr_raw).get("hidden_from_staff", False)
+                    except: pass
+                
+                hide_lbl = "👁️ Unhide from Staff" if is_hidden else "👁️ Hide from Staff"
+                menu.add_command(label=hide_lbl, command=lambda: self.toggle_hide_staff(row_id, is_hidden))
+                
             if not self.is_bulk_mode:
                 menu.add_separator()
                 menu.add_command(label="📄 Bulk Export", command=lambda: self.enable_bulk("export"))
@@ -730,11 +791,24 @@ class CustomersView(tk.Frame):
         filter_opt = self.filter_var.get()
         self.phone_data_map.clear()
         
+        is_admin = (getattr(self.app, "current_role", "Admin") == "Admin")
+        
         records = []
         for c in customers:
             cust_id = c[0]
             customer_name = str(c[1])
             alias = str(c[8]).strip() if len(c) > 8 and c[8] else ""
+            
+            # --- THE FIX: Check if hidden and skip for staff ---
+            raw_addr = str(c[5]) if len(c) > 5 and c[5] else ""
+            is_hidden = False
+            if raw_addr and raw_addr.strip().startswith("{"):
+                try: is_hidden = json.loads(raw_addr).get("hidden_from_staff", False)
+                except: pass
+                
+            if is_hidden and not is_admin:
+                continue
+                
             display_name = f"{customer_name} ({alias})" if alias else customer_name
             
             # --- THE FIX: Use secure Database ID for math engine! ---
@@ -770,15 +844,40 @@ class CustomersView(tk.Frame):
             else: self.phone_data_map[str(c[0])] = []
 
             # --- THE FIX: Revert to strictly showing the clean raw name in the table! ---
-            records.append({'id': c[0], 'name': customer_name, 'phone': display_phone, 'pan': pan_val, 'gstin': c[3], 'balance': total_due})
+            final_name_display = f"{customer_name} 🔒" if (is_hidden and is_admin) else customer_name
+            records.append({'id': c[0], 'name': final_name_display, 'phone': display_phone, 'pan': pan_val, 'gstin': c[3], 'balance': total_due})
 
         if filter_opt == "Highest Balance": records.sort(key=lambda x: x['balance'], reverse=True)
         elif filter_opt == "Lowest Balance": records.sort(key=lambda x: x['balance'])
         elif filter_opt == "Z to A": records.sort(key=lambda x: str(x['name']).lower(), reverse=True)
         else: records.sort(key=lambda x: str(x['name']).lower())
 
-        display_index = 1
-        for rec in records:
+        # --- THE FIX: PAGINATION MATH, AUTO-JUMP, & SLICING ---
+        import math
+        self.total_pages = math.ceil(len(records) / getattr(self, 'items_per_page', 50))
+        if self.total_pages < 1: self.total_pages = 1
+        if getattr(self, 'current_page', 1) > self.total_pages: self.current_page = self.total_pages
+
+        start_idx = (getattr(self, 'current_page', 1) - 1) * getattr(self, 'items_per_page', 50)
+        end_idx = start_idx + getattr(self, 'items_per_page', 50)
+        
+        paginated_list = records[start_idx:end_idx]
+
+        if hasattr(self, 'lbl_page'):
+            self.lbl_page.config(text=f"Page {self.current_page} of {self.total_pages}")
+            
+            if self.current_page <= 1:
+                self.btn_prev.config(state="disabled", fg=self.colors["border"], bg=self.colors["bg"], cursor="arrow")
+            else:
+                self.btn_prev.config(state="normal", fg=self.colors["text_sec"], bg=self.colors["bg"], cursor="hand2")
+                
+            if self.current_page >= self.total_pages:
+                self.btn_next.config(state="disabled", bg=self.colors["bg"], fg=self.colors["border"], cursor="arrow")
+            else:
+                self.btn_next.config(state="normal", bg=self.colors["card"], fg=self.colors["text"], cursor="hand2")
+
+        display_index = start_idx + 1
+        for rec in paginated_list:
             formatted = format_currency(abs(rec['balance']), self.curr_fmt)
             if rec['balance'] > 0: formatted_balance = f"+ {formatted} (Receivable)"
             elif rec['balance'] < 0: formatted_balance = f"- {formatted} (Payable)"
@@ -795,10 +894,37 @@ class CustomersView(tk.Frame):
             self.tree.insert("", "end", iid=str(rec['id']), values=(sno_display, rec['name'], rec['phone'], rec['pan'], rec['gstin'], formatted_balance, action_txt, ""), tags=(tag,))
             display_index += 1
 
-        for i in range(display_index, 16):
-            tag = "evenrow" if i % 2 != 0 else "oddrow"
-            self.tree.insert("", "end", iid=f"empty_{i}", values=("", "", "", "", "", "", "", ""), tags=(tag, "empty"))
-            # -------------------------------------------------------------------
+        current_rows = len(paginated_list)
+        if current_rows < 15:
+            for i in range(display_index, start_idx + 16):
+                tag = "evenrow" if i % 2 != 0 else "oddrow"
+                self.tree.insert("", "end", iid=f"empty_{i}", values=("", "", "", "", "", "", "", ""), tags=(tag, "empty"))
+        # -------------------------------------------------------------------
+
+    def toggle_hide_staff(self, row_id, currently_hidden):
+        comp_id = getattr(self.app, "active_company_id", 1)
+        conn = database.get_connection()
+        c = conn.cursor()
+        c.execute("SELECT address, name FROM customers WHERE id=? AND company_id=?", (row_id, comp_id))
+        row = c.fetchone()
+        if row:
+            raw_addr = str(row[0]).strip() if row[0] else ""
+            p_name = str(row[1])
+            j_data = {}
+            if raw_addr.startswith("{"):
+                try: j_data = json.loads(raw_addr)
+                except: j_data = {"address": raw_addr}
+            else:
+                j_data = {"address": raw_addr}
+                
+            j_data["hidden_from_staff"] = not currently_hidden
+            c.execute("UPDATE customers SET address=? WHERE id=? AND company_id=?", (json.dumps(j_data), row_id, comp_id))
+            conn.commit()
+            
+            status_txt = "Hidden" if not currently_hidden else "Unhidden"
+            database.log_audit("Parties", "Visibility Toggled", record_ref=p_name, details=f"{status_txt} party from non-admin staff.", amount=0.0, company_id=comp_id)
+        conn.close()
+        self.load_data()
 
     def delete_customer(self, row_id):
         if getattr(self.app, "current_role", "Admin") != "Admin":

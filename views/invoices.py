@@ -1453,7 +1453,7 @@ class InvoicesView(tk.Frame):
         conn = database.get_connection()
         c = conn.cursor()
         placeholders = ",".join("?" for _ in self.bulk_selection)
-        c.execute(f"SELECT id, invoice_date, invoice_number, customer_name, subtotal, (cgst+sgst+igst) as total_gst, total, status, amount_paid, write_off FROM invoices WHERE id IN ({placeholders}) AND company_id=? ORDER BY id DESC", (*self.bulk_selection, self.comp_id))
+        c.execute(f"SELECT id, invoice_date, invoice_number, customer_name, subtotal, (cgst+sgst+igst) as total_gst, total, status, amount_paid, write_off, place_of_service FROM invoices WHERE id IN ({placeholders}) AND company_id=? ORDER BY id DESC", (*self.bulk_selection, self.comp_id))
         selected_rows = c.fetchall()
         
         # --- THE FIX: Fetch TDS logic for bulk export ---
@@ -1461,14 +1461,21 @@ class InvoicesView(tk.Frame):
         tds_map = {}
         for ref_str, amt in c.fetchall():
             if ref_str:
-                bill_no = ref_str.split(" (")[0].strip()
-                tds_map[bill_no] = tds_map.get(bill_no, 0.0) + float(amt or 0.0)
+                for part in str(ref_str).split(" | "):
+                    b_no = part.split(" (")[0].strip()
+                    m = re.search(r'\((.*?)\)', part)
+                    if m:
+                        clean_amt = re.sub(r'[^\d\.]', '', m.group(1))
+                        try: tds_map[b_no] = tds_map.get(b_no, 0.0) + float(clean_amt)
+                        except: pass
+                    else:
+                        tds_map[b_no] = tds_map.get(b_no, 0.0) + float(amt or 0.0)
         conn.close()
         # ------------------------------------------------
 
         export_idx = 1
         for row in selected_rows:
-            inv_id, inv_date, inv_num, cust_name, sub, total_gst, tot, stat, amt_paid, woff = row
+            inv_id, inv_date, inv_num, cust_name, sub, total_gst, tot, stat, amt_paid, woff, place_str = row
             woff = float(woff or 0.0)
             due = max(0.0, float(tot or 0.0) - float(amt_paid or 0.0) - woff)
 
@@ -1478,10 +1485,26 @@ class InvoicesView(tk.Frame):
 
             fmt_date = smart_date_formatter(inv_date, self.date_fmt_code)
             tds_val = tds_map.get(inv_num, 0.0)
+            
+            # --- THE FIX: Extract Discount to show true Taxable Subtotal! ---
+            disc_amt = 0.0
+            if place_str and "@@DISC@@" in place_str:
+                m_disc = re.search(r'@@DISC@@(.*?)@@', place_str + "@@")
+                if m_disc:
+                    d_parts = m_disc.group(1).split('||')
+                    if len(d_parts) > 0 and str(d_parts[0]).strip() == "1":
+                        try: d_val = float(d_parts[1].strip() or 0.0)
+                        except: d_val = 0.0
+                        d_typ = d_parts[2].strip() if len(d_parts) > 2 else "%"
+                        if "%" in d_typ: disc_amt = float(sub or 0.0) * (d_val / 100.0)
+                        else: disc_amt = d_val
+                        
+            taxable_sub = max(0.0, float(sub or 0.0) - disc_amt)
+            # ----------------------------------------------------------------
 
             self.tree.insert("", "end", iid=str(inv_id), values=(
                 export_idx, fmt_date, inv_num, cust_name, 
-                format_currency(sub, self.curr_fmt), format_currency(total_gst, self.curr_fmt), 
+                format_currency(taxable_sub, self.curr_fmt), format_currency(total_gst, self.curr_fmt), 
                 format_currency(tot, self.curr_fmt), format_currency(tds_val, self.curr_fmt), stat_txt, ""
             ))
             export_idx += 1
@@ -1532,8 +1555,15 @@ class InvoicesView(tk.Frame):
         self.tds_map = {}
         for ref_str, amt in c.fetchall():
             if ref_str:
-                bill_no = ref_str.split(" (")[0].strip()
-                self.tds_map[bill_no] = self.tds_map.get(bill_no, 0.0) + float(amt or 0.0)
+                for part in str(ref_str).split(" | "):
+                    b_no = part.split(" (")[0].strip()
+                    m = re.search(r'\((.*?)\)', part)
+                    if m:
+                        clean_amt = re.sub(r'[^\d\.]', '', m.group(1))
+                        try: self.tds_map[b_no] = self.tds_map.get(b_no, 0.0) + float(clean_amt)
+                        except: pass
+                    else:
+                        self.tds_map[b_no] = self.tds_map.get(b_no, 0.0) + float(amt or 0.0)
         # ------------------------------------------------------------
         conn.close()
         
@@ -1568,9 +1598,29 @@ class InvoicesView(tk.Frame):
         
         real_invoices = [i for i in period_filtered_invoices if i[7] != 'Draft']
         
+        # --- THE FIX: Mask Financial Values for Non-Admins ---
+        hide_money = False
+        try:
+            uid = getattr(self.app, "current_user_id", 1)
+            if str(uid) != "1":
+                perms = database.get_user_permissions(uid)
+                rules_data = perms.get("invoice_rules", {})
+                cid_str = str(self.comp_id)
+                if isinstance(rules_data, dict) and ("global" in rules_data or any(k.isdigit() for k in rules_data.keys())):
+                    rules = rules_data.get(cid_str, rules_data.get("global", {}))
+                else:
+                    rules = rules_data
+                hide_money = rules.get("hide_financials", False)
+        except Exception: pass
+        # -----------------------------------------------------
+
         self.stat_count_var.set(str(len(real_invoices)))
         total_billed = sum(float(i[6] or 0.0) for i in real_invoices)
-        self.stat_billed_var.set(format_currency(total_billed, self.curr_fmt))
+        
+        if hide_money:
+            self.stat_billed_var.set("****")
+        else:
+            self.stat_billed_var.set(format_currency(total_billed, self.curr_fmt))
         
         self.stat_paid_var.set(str(sum(1 for i in real_invoices if i[7] == 'Paid')))
         
@@ -1583,8 +1633,12 @@ class InvoicesView(tk.Frame):
                 if due > 0.01:
                     unpaid_count += 1
                     tot_unpaid_amt += due
-                    
-        unpaid_str = f"{unpaid_count}  |  {format_currency(tot_unpaid_amt, self.curr_fmt)}"
+        
+        if hide_money:
+            unpaid_str = f"{unpaid_count}  |  ****"
+        else:
+            unpaid_str = f"{unpaid_count}  |  {format_currency(tot_unpaid_amt, self.curr_fmt)}"
+            
         self.stat_unpaid_var.set(unpaid_str)
         
         str_len = len(unpaid_str)
@@ -1731,12 +1785,28 @@ class InvoicesView(tk.Frame):
             
             display_idx = "[✓]" if self.bulk_mode and str(inv_id) in self.bulk_selection else "[  ]" if self.bulk_mode else idx
             
+            # --- THE FIX: Extract Discount to show true Taxable Subtotal! ---
+            disc_amt = 0.0
+            if place_str and "@@DISC@@" in place_str:
+                m_disc = re.search(r'@@DISC@@(.*?)@@', place_str + "@@")
+                if m_disc:
+                    d_parts = m_disc.group(1).split('||')
+                    if len(d_parts) > 0 and str(d_parts[0]).strip() == "1":
+                        try: d_val = float(d_parts[1].strip() or 0.0)
+                        except: d_val = 0.0
+                        d_typ = d_parts[2].strip() if len(d_parts) > 2 else "%"
+                        if "%" in d_typ: disc_amt = float(sub or 0.0) * (d_val / 100.0)
+                        else: disc_amt = d_val
+                        
+            taxable_sub = max(0.0, float(sub or 0.0) - disc_amt)
+            # ----------------------------------------------------------------
+            
             # --- THE FIX: Inject TDS Value into the Main View ---
             tds_val = self.tds_map.get(inv_num, 0.0)
             
             self.tree.insert("", "end", iid=str(inv_id), values=(
                 display_idx, formatted_date, inv_num, cust_name, 
-                format_currency(sub, self.curr_fmt), format_currency(total_gst, self.curr_fmt), 
+                format_currency(taxable_sub, self.curr_fmt), format_currency(total_gst, self.curr_fmt), 
                 format_currency(tot, self.curr_fmt), format_currency(tds_val, self.curr_fmt), stat_txt, ""
             ), tags=(stripe_tag, status_tag))
             # ----------------------------------------------------

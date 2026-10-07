@@ -187,12 +187,29 @@ class PurchasesView(tk.Frame):
         self.left_toolbar.pack(side="left", fill="y")
 
         self.search_var = tk.StringVar()
-        search_entry = tk.Entry(self.left_toolbar, textvariable=self.search_var, font=("Segoe UI", 10), width=22, bg=self.colors["bg"], fg=self.colors["text"], insertbackground=self.colors["text"], highlightbackground=self.colors["border"], highlightthickness=1)
+        search_entry = tk.Entry(self.left_toolbar, textvariable=self.search_var, font=("Segoe UI", 10), width=22, bg=self.colors["card"], fg=self.colors["text"], insertbackground=self.colors["text"], highlightbackground=self.colors["border"], highlightthickness=1)
         search_entry.pack(side="left", ipady=3)
         search_entry.insert(0, "Search Vendor or Bill...")
         search_entry.bind("<FocusIn>", lambda e: search_entry.delete(0, "end") if search_entry.get() == "Search Vendor or Bill..." else None)
         search_entry.bind("<FocusOut>", lambda e: search_entry.insert(0, "Search Vendor or Bill...") if not search_entry.get() else None)
-        self.search_var.trace_add("write", lambda *args: self.load_data() if search_entry.get() != "Search Vendor or Bill..." else None)
+        self.search_var.trace_add("write", lambda *args: [setattr(self, 'current_page', 1), self.tree.yview_moveto(0), self.load_data()] if search_entry.get() != "Search Vendor or Bill..." else None)
+
+        # --- THE FIX: Added 'X' Clear Button for Search (Styled to match Invoices exactly!) ---
+        def force_clear_search():
+            self.search_var.set("Search Vendor or Bill...")
+            self.focus_set()
+            self.current_page = 1
+            self.load_data()
+
+        btn_clear_search = tk.Button(self.left_toolbar, text="✖", font=("Arial", 10, "bold"), bg=self.colors["card"], fg=self.colors["error"], relief="solid", bd=1, cursor="hand2", command=force_clear_search)
+        btn_clear_search.pack(side="left", padx=(5, 0), ipady=3, ipadx=8)
+        
+        def add_hover_effect(widget, default_bg, hover_bg):
+            widget.bind("<Enter>", lambda e: widget.config(bg=hover_bg))
+            widget.bind("<Leave>", lambda e: widget.config(bg=default_bg))
+            
+        add_hover_effect(btn_clear_search, self.colors["card"], self.colors["hover"])
+        # ------------------------------------------------------------------------------------
 
         tk.Label(self.left_toolbar, text="Sort By:", font=("Segoe UI", 10), bg=self.colors["bg"], fg=self.colors["text_sec"]).pack(side="left", padx=(15, 5))
         self.sort_var = tk.StringVar(value="Latest")
@@ -1643,21 +1660,37 @@ class PurchasesView(tk.Frame):
                 
             self.lbl_t_count.config(text=str(tot_count))
             
-            # --- THE FIX: Hide Billed Amount from Non-Admins ---
-            curr_role = getattr(self.app, "current_role", "Admin")
-            curr_uid = getattr(self.app, "current_user_id", None) or getattr(database, "ACTIVE_USER_ID", 1)
-            is_admin = (curr_role == "Admin" or str(curr_uid) == "1")
+            # --- THE FIX: Hide Financial Totals for Non-Admins (Based on Settings) ---
+            hide_money = False
+            try:
+                curr_role = getattr(self.app, "current_role", "Admin")
+                curr_uid = getattr(self.app, "current_user_id", None) or getattr(database, "ACTIVE_USER_ID", 1)
+                
+                if curr_role != "Admin" and str(curr_uid) != "1":
+                    perms = database.get_user_permissions(curr_uid)
+                    rules_data = perms.get("purchase_rules", {})
+                    cid_str = str(self.comp_id)
+                    if isinstance(rules_data, dict) and ("global" in rules_data or any(k.isdigit() for k in rules_data.keys())):
+                        rules = rules_data.get(cid_str, rules_data.get("global", {}))
+                    else:
+                        rules = rules_data
+                    hide_money = rules.get("hide_financials", False)
+            except Exception: pass
             
-            if is_admin:
-                self.update_dynamic_tile(self.lbl_t_billed, format_currency(tot_billed, self.curr_fmt))
+            if hide_money:
+                self.update_dynamic_tile(self.lbl_t_billed, "****")
             else:
-                self.update_dynamic_tile(self.lbl_t_billed, "🔒 Hidden")
-            # ---------------------------------------------------
+                self.update_dynamic_tile(self.lbl_t_billed, format_currency(tot_billed, self.curr_fmt))
+            # -----------------------------------------------------------------------
             
             self.lbl_t_paid.config(text=str(paid_count))
             
             # --- THE FIX: Format unpaid string and set it ---
-            unpaid_str = f"{unpaid_count}  |  {format_currency(tot_unpaid_amt, self.curr_fmt)}"
+            if hide_money:
+                unpaid_str = f"{unpaid_count}  |  ****"
+            else:
+                unpaid_str = f"{unpaid_count}  |  {format_currency(tot_unpaid_amt, self.curr_fmt)}"
+                
             self.update_dynamic_tile(self.lbl_t_unpaid, unpaid_str)
             # ------------------------------------------------
             

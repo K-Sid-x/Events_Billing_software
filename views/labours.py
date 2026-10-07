@@ -119,10 +119,10 @@ class LaboursView(tk.Frame):
         self.search_entry.insert(0, "Search Name/Role/Phone...")
         self.search_entry.bind("<FocusIn>", lambda args: self.search_entry.delete('0', 'end') if self.search_entry.get() == 'Search Name/Role/Phone...' else None)
         self.search_entry.bind("<FocusOut>", lambda args: self.search_entry.insert(0, 'Search Name/Role/Phone...') if not self.search_entry.get() else None)
-        self.search_var.trace_add("write", lambda *args: self.load_data() if self.search_entry.get() != 'Search Name/Role/Phone...' else None)
+        self.search_var.trace_add("write", lambda *args: [setattr(self, 'current_page', 1), self.tree.yview_moveto(0), self.load_data()] if self.search_entry.get() != 'Search Name/Role/Phone...' else None)
 
         # --- THE FIX: Perfectly Sized Red 'X' Clear Button ---
-        btn_clear_search = tk.Button(action_bar, text="✖", font=("Arial", 9), bg=self.colors["border"], fg=self.colors["error"], activebackground=self.colors["border"], activeforeground=self.colors["error"], relief="solid", bd=1, pady=0, padx=0, cursor="hand2", command=lambda: [self.search_var.set("Search Name/Role/Phone..."), self.focus_set(), self.load_data()])
+        btn_clear_search = tk.Button(action_bar, text="✖", font=("Arial", 9), bg=self.colors["border"], fg=self.colors["error"], activebackground=self.colors["border"], activeforeground=self.colors["error"], relief="solid", bd=1, pady=0, padx=0, cursor="hand2", command=lambda: [setattr(self, 'current_page', 1), self.search_var.set("Search Name/Role/Phone..."), self.focus_set(), self.tree.yview_moveto(0), self.load_data()])
         btn_clear_search.pack(side="left", padx=(2, 10), ipady=1, ipadx=3)
         # -----------------------------------------------------
 
@@ -133,7 +133,7 @@ class LaboursView(tk.Frame):
         tk.Label(action_bar, text="Sort By:", bg=self.colors["card"], font=("Segoe UI", 9, "bold"), fg=self.colors["text_sec"]).pack(side="left", padx=(10, 5))
         sort_cb = ttk.Combobox(action_bar, textvariable=self.roster_sort_var, values=["ID (Ascending)", "ID (Descending)", "Name (A to Z)", "Name (Z to A)"], state="readonly", width=14, font=("Segoe UI", 10), cursor="hand2")
         sort_cb.pack(side="left", ipady=3)
-        sort_cb.bind("<<ComboboxSelected>>", lambda e: self.load_data())
+        sort_cb.bind("<<ComboboxSelected>>", lambda e: [setattr(self, 'current_page', 1), self.tree.yview_moveto(0), self.load_data()])
         # -----------------------------------------------
 
         self.btn_add = tk.Button(action_bar, text="➕ Add Worker", font=("Segoe UI", 11, "bold"), bg=self.colors["accent_blue"], fg="#ffffff", relief="flat", cursor="hand2", padx=15, pady=5, command=lambda: open_labour_form(self))
@@ -249,7 +249,38 @@ class LaboursView(tk.Frame):
         self.tree.bind("<MouseWheel>", lambda e: _fast_scroll(e, "y"))
         self.tree.bind("<Shift-MouseWheel>", lambda e: _fast_scroll(e, "x"))
 
+        # --- THE FIX: ADDING PAGINATION UI & STATE ---
+        self.current_page = 1
+        self.items_per_page = 50
+        self.total_pages = 1
+
+        self.pagination_frame = tk.Frame(main_container, bg=self.colors["bg"])
+        self.pagination_frame.pack(side="bottom", fill="x", pady=(5, 10))
+        
+        table_frame.pack_forget()
+        table_frame.pack(side="top", fill="both", expand=True)
+
+        self.btn_prev = tk.Button(self.pagination_frame, text="< Previous", font=("Segoe UI", 10, "bold"), bg=self.colors["bg"], fg=self.colors["text_sec"], relief="flat", cursor="hand2", command=self.prev_page)
+        self.btn_prev.pack(side="left", expand=True, anchor="e", padx=10)
+
+        self.lbl_page = tk.Label(self.pagination_frame, text="Page 1 of 1", font=("Segoe UI", 10, "bold"), bg=self.colors["bg"], fg=self.colors["text"])
+        self.lbl_page.pack(side="left", expand=False, anchor="center")
+
+        self.btn_next = tk.Button(self.pagination_frame, text="Next >", font=("Segoe UI", 10, "bold"), bg=self.colors["card"], fg=self.colors["text"], relief="solid", bd=1, cursor="hand2", command=self.next_page, padx=10, pady=3)
+        self.btn_next.pack(side="left", expand=True, anchor="w", padx=10)
+        # ---------------------------------------------
+
         self.load_data()
+
+    def prev_page(self):
+        if self.current_page > 1:
+            self.current_page -= 1
+            self.load_data()
+
+    def next_page(self):
+        if self.current_page < getattr(self, 'total_pages', 1):
+            self.current_page += 1
+            self.load_data()
 
     def update_ur_btns(self):
         if self.undo_stack: self.btn_undo.config(state="normal", fg=self.colors["accent_blue"], cursor="hand2")
@@ -571,13 +602,37 @@ class LaboursView(tk.Frame):
         # --- SECOND PASS: Force Pinned to Top (Stable Sort) ---
         processed_labours.sort(key=lambda x: x["is_pinned"], reverse=True)
 
+        # --- THE FIX: PAGINATION MATH & SLICING ---
+        import math
+        self.total_pages = math.ceil(len(processed_labours) / getattr(self, 'items_per_page', 50))
+        if self.total_pages < 1: self.total_pages = 1
+        if getattr(self, 'current_page', 1) > self.total_pages: self.current_page = self.total_pages
+
+        start_idx = (getattr(self, 'current_page', 1) - 1) * getattr(self, 'items_per_page', 50)
+        end_idx = start_idx + getattr(self, 'items_per_page', 50)
+        
+        paginated_list = processed_labours[start_idx:end_idx]
+
+        if hasattr(self, 'lbl_page'):
+            self.lbl_page.config(text=f"Page {self.current_page} of {self.total_pages}")
+            
+            if self.current_page <= 1:
+                self.btn_prev.config(state="disabled", fg=self.colors["border"], bg=self.colors["bg"], cursor="arrow")
+            else:
+                self.btn_prev.config(state="normal", fg=self.colors["text_sec"], bg=self.colors["bg"], cursor="hand2")
+                
+            if self.current_page >= self.total_pages:
+                self.btn_next.config(state="disabled", bg=self.colors["bg"], fg=self.colors["border"], cursor="arrow")
+            else:
+                self.btn_next.config(state="normal", bg=self.colors["card"], fg=self.colors["text"], cursor="hand2")
+
         # --- THE FIX: Fetch all balances in ONE lightning-fast query! ---
         all_balances = database.get_all_labour_balances()
         # ----------------------------------------------------------------
 
-        display_idx = 1
+        display_idx = start_idx + 1
         
-        for p_labour in processed_labours:
+        for p_labour in paginated_list:
             l_id = p_labour["l_id"]
             l_dict = p_labour["l_dict"]
             name = p_labour["name"]
