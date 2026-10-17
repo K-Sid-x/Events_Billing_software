@@ -21,23 +21,8 @@ if root_dir not in sys.path:
 # -----------------------------------------------
 
 import database
-from views.invoice_parts.helpers import format_currency, enable_copy_paste, smart_date_formatter, get_date_format_str, unpack_place_data
-
-def extract_address(addr_str):
-    if not addr_str: return ""
-    s_val = str(addr_str).strip()
-    if s_val.startswith("{"):
-        try:
-            d = json.loads(s_val)
-            if isinstance(d, dict) and "address" in d: return d["address"]
-        except: pass
-        try:
-            d = ast.literal_eval(s_val)
-            if isinstance(d, dict) and "address" in d: return d["address"]
-        except: pass
-        match = re.search(r'(?:"|\')address(?:"|\')\s*:\s*(?:"|\')(.*?)(?:"|\')\s*(?:,|})', s_val)
-        if match: return match.group(1)
-    return s_val
+# --- THE FIX: Stripped redundant math, importing extract_address securely from central helpers! ---
+from views.invoice_parts.helpers import format_currency, enable_copy_paste, smart_date_formatter, get_date_format_str, unpack_place_data, extract_address
 
 def build_part_3(parent, state):
     theme = state.theme  
@@ -83,13 +68,40 @@ def build_part_3(parent, state):
     tk.Entry(disc_input_f, textvariable=state.discount_val_var, font=("Arial", 10), width=10, bg=theme["bg"], fg=theme["text"], insertbackground=theme["text"], highlightbackground=theme["border"], highlightthickness=1).pack(side="left", ipady=2)
     ttk.Combobox(disc_input_f, textvariable=state.discount_type_var, values=["%", f"Flat ({curr_sym})"], state="readonly", width=10, style="Theme.TCombobox").pack(side="left", padx=(5, 0), ipady=2)
 
-    if not hasattr(state, 'adv_date_var'): state.adv_date_var = tk.StringVar(value=datetime.now().strftime(get_date_format_str()))
-    if not hasattr(state, 'adv_mode_var'): state.adv_mode_var = tk.StringVar(value="Cash")
+    target_df = get_date_format_str()
+    if not hasattr(state, 'adv_date_var'):
+        state.adv_date_var = tk.StringVar(value=datetime.now().strftime(target_df))
+    if not hasattr(state, 'adv_mode_var'):
+        state.adv_mode_var = tk.StringVar(value="Cash")
+
+    # Fallback for existing invoices saved before Advance Date/Mode were packed into @@ADV@@
+    if getattr(state, "is_edit_mode", False) and state.inc_adv_var.get() == 1:
+        try:
+            comp_id_adv = getattr(state.view.winfo_toplevel(), "active_company_id", 1)
+            inv_no_adv = state.inv_num_var.get().strip()
+            conn_adv = database.get_connection()
+            cur_adv = conn_adv.cursor()
+            cur_adv.execute(
+                "SELECT pay_date, mode FROM party_payments WHERE company_id=? AND ref LIKE ? AND notes='Advance received during invoice generation.' ORDER BY id DESC LIMIT 1",
+                (comp_id_adv, f"{inv_no_adv} (%")
+            )
+            adv_row = cur_adv.fetchone()
+            conn_adv.close()
+            if adv_row:
+                if adv_row[0]:
+                    state.adv_date_var.set(smart_date_formatter(str(adv_row[0]).strip(), target_df))
+                if adv_row[1]:
+                    saved_m = str(adv_row[1]).strip()
+                    state.adv_mode_var.set("Advance Wallet" if "Wallet" in saved_m else saved_m)
+        except Exception:
+            pass
 
     # --- THE FIX: Display Advance safely on Posted Invoices (Unlocked) ---
     if hasattr(state, "clone_id"):
         state.inc_adv_var.set(0)
         state.adv_val_var.set("")
+        state.adv_date_var.set(datetime.now().strftime(target_df))
+        state.adv_mode_var.set("Cash")
 
     adv_cb = tk.Checkbutton(extras_f, text="Advance Received", variable=state.inc_adv_var, bg=theme["card"], fg=theme["text"], selectcolor=theme["bg"], font=("Arial", 10, "bold"), anchor="w")
     adv_cb.grid(row=1, column=0, sticky="w", pady=2)
@@ -114,12 +126,16 @@ def build_part_3(parent, state):
     
     def update_adv_modes(*args):
         c_name = state.cust_var.get().strip()
+        c_id = getattr(state, "cust_id", None)
         comp_id = getattr(state.view.winfo_toplevel(), "active_company_id", 1)
         wall_bal = 0.0
         try:
             conn = database.get_connection()
             c = conn.cursor()
-            c.execute("SELECT address FROM customers WHERE name=? AND company_id=?", (c_name, comp_id))
+            if c_id:
+                c.execute("SELECT address FROM customers WHERE id=? AND company_id=?", (c_id, comp_id))
+            else:
+                c.execute("SELECT address FROM customers WHERE name=? AND company_id=?", (c_name, comp_id))
             r = c.fetchone()
             conn.close()
             if r and r[0]:
@@ -452,7 +468,7 @@ def build_part_3(parent, state):
         except: d_inc = 0
             
         disc_str = f"@@DISC@@{d_inc}||{d_val}||{d_typ}"
-        adv_str = f"@@ADV@@{state.inc_adv_var.get()}||{state.adv_val_var.get()}"
+        adv_str = f"@@ADV@@{state.inc_adv_var.get()}||{state.adv_val_var.get()}||{state.adv_date_var.get()}||{state.adv_mode_var.get()}"
         
         page_str = f"@@PAGE@@{state.page_num_var.get()}"
         sig_str = f"@@SIG@@{state.selected_sig_var.get()}"
@@ -481,8 +497,9 @@ def build_part_3(parent, state):
         
         if not cust_addr and cust_name:
             try:
+                target_cid = getattr(state, "cust_id", None)
                 for c in database.get_all_customers():
-                    if c[1] == cust_name:
+                    if (target_cid and c[0] == target_cid) or (not target_cid and c[1] == cust_name):
                         if not cust_phone and len(c) > 2 and c[2]: cust_phone = str(c[2]).strip()
                         if not cust_gst and len(c) > 3 and c[3]: cust_gst = str(c[3]).strip()
                         if len(c) > 5 and c[5]: cust_addr = str(c[5]).strip()
@@ -529,6 +546,9 @@ def build_part_3(parent, state):
             "cgst_rate": state.cgst_rate_var.get(),
             "sgst_rate": state.sgst_rate_var.get(),
             "igst_rate": state.igst_rate_var.get(),
+            # --- THE FIX: Pack the new tax_type so Print Studio can read it! ---
+            "tax_type": state.tax_type_var.get() if hasattr(state, 'tax_type_var') else "",
+            # -------------------------------------------------------------------
             "total": float(state.grand_total_var.get() or 0.0),
             "page_num": state.page_num_var.get(),
             "selected_sig": state.selected_sig_var.get(),
@@ -840,7 +860,7 @@ def build_part_3(parent, state):
                         clean_mode = "Wallet Deduction" if "Wallet" in pay_mode else pay_mode
                         
                         if "Wallet" in pay_mode:
-                            database.internal_update_wallet(cur_p, comp_id, state.cust_var.get(), -adv_amt, "advance_in")
+                            database.internal_update_wallet(cur_p, comp_id, state.cust_var.get(), -adv_amt, "advance_in", getattr(state, 'cust_id', None))
                             
                         ref_str = f"{inv_num} ({adv_amt})"
                         
@@ -872,9 +892,9 @@ def build_part_3(parent, state):
         if b_type == "Sales" and not state.is_edit_mode and not is_draft:
             today_str = datetime.now().strftime("%Y-%m-%d")
             for item in valid_items:
-                # --- THE FIX: Unpack all 7 items to prevent inventory crash! ---
+                # --- THE FIX: Unpack all 7 items & strip rich-text/void markers before deducting stock! ---
                 raw_name, sac, rt, q, d, a, u = item
-                clean_name = raw_name.replace("@@B@@", "").replace("@@U@@", "")
+                clean_name = re.sub(r'(\[B\]|\[/B\]|\[U\]|\[/U\]|@@B@@|@@U@@|\u200b)', '', raw_name).strip()
                 
                 unit = "Pcs"
                 mrp = rt

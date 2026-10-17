@@ -18,19 +18,11 @@ if root_dir not in sys.path:
 # -----------------------------------------------
 
 import database
-from views.invoice_parts.helpers import enable_copy_paste, grab_global_scroll
+from views.invoice_parts.helpers import enable_copy_paste, grab_global_scroll, GST_STATE_CODES, extract_address
 
-GST_STATES = {
-    "01": "Jammu & Kashmir", "02": "Himachal Pradesh", "03": "Punjab", "04": "Chandigarh",
-    "05": "Uttarakhand", "06": "Haryana", "07": "Delhi", "08": "Rajasthan", "09": "Uttar Pradesh",
-    "10": "Bihar", "11": "Sikkim", "12": "Arunachal Pradesh", "13": "Nagaland", "14": "Manipur",
-    "15": "Mizoram", "16": "Tripura", "17": "Meghalaya", "18": "Assam", "19": "West Bengal",
-    "20": "Jharkhand", "21": "Odisha", "22": "Chhattisgarh", "23": "Madhya Pradesh", "24": "Gujarat",
-    "26": "Dadra & Nagar Haveli and Daman & Diu", "27": "Maharashtra", "28": "Andhra Pradesh",
-    "29": "Karnataka", "30": "Goa", "31": "Lakshadweep", "32": "Kerala", "33": "Tamil Nadu",
-    "34": "Puducherry", "35": "Andaman & Nicobar Islands", "36": "Telangana", "37": "Andhra Pradesh",
-    "38": "Ladakh"
-}
+# --- THE FIX: Eradicated duplicate dictionary! Dynamically pulls from helpers.py ---
+GST_STATES = {k: v.split(", Code - ")[0] for k, v in GST_STATE_CODES.items()}
+# -----------------------------------------------------------------------------------
 
 def open_format_cells(state, btn_widget=None):
     theme = state.theme
@@ -369,66 +361,73 @@ def open_invoice_add_party(state, lookup_customer_cb):
         
         final_gstin = g_var.get().strip() if getattr(state, 'has_gst', True) else ""
 
-        # --- THE FIX: Route through database.py gatekeepers to prevent schema bypass! ---
-        existing = database.get_customer_by_name(name)
-        if existing:
-            existing_gst = str(existing[3]).strip().lower() if existing[3] else ""
-            if not final_gstin or existing_gst == final_gstin.lower():
-                messagebox.showerror("Duplicate Found", "A party with this exact Name and GSTIN already exists.", parent=q_pop)
-                return
+        comp_id = getattr(state.view.winfo_toplevel(), "active_company_id", 1)
+        conn_chk = database.get_connection()
+        c_chk = conn_chk.cursor()
+        c_chk.execute("SELECT id FROM customers WHERE LOWER(name)=LOWER(?) AND LOWER(COALESCE(alias, ''))=LOWER(?) AND LOWER(COALESCE(gstin, ''))=LOWER(?) AND company_id=?", (name, alias, final_gstin, comp_id))
+        if c_chk.fetchone():
+            conn_chk.close()
+            messagebox.showerror("Duplicate Found", "A party with this exact Name, Alias, and GSTIN already exists.", parent=q_pop)
+            return
+        conn_chk.close()
 
         try:
             all_phones = [v.get().strip() for v in phone_vars if v.get().strip()]
             final_phone = ", ".join(all_phones) if all_phones else ""
             raw_addr = addr_text.get("1.0", "end-1c").strip()
+            pan_text = pan_var.get().upper().strip()
             
             try: ob_val = float(ob_var.get().replace(",", ""))
             except: ob_val = 0.0
             
-            ob_type = "Dr" if "Dr" in cb_acc.get() else "Cr"
+            final_ob_type = cb_acc.get() or "They Owe You (Dr)"
+            ob_short = "Dr" if "Dr" in final_ob_type else "Cr"
             
-            p_days = "".join(filter(str.isdigit, pay_days_var.get())) or "0"
-            r_days = "".join(filter(str.isdigit, rec_days_var.get())) or "0"
+            p_days = int("".join(filter(str.isdigit, pay_days_var.get())) or 0)
+            r_days = int("".join(filter(str.isdigit, rec_days_var.get())) or 0)
             
             addr_json = json.dumps({
-                "address": raw_addr, 
-                "advance_in": 0.0,
-                "advance_out": 0.0,
+                "address": raw_addr,
+                "state": st_var.get().strip(),
+                "pan": pan_text,
                 "opening_balance": ob_val,
-                "opening_balance_type": ob_type,
-                "payable_days": int(p_days),
-                "receivable_days": int(r_days)
+                "ob_type": final_ob_type,
+                "ob_paid": 0.0,
+                "payable_terms": p_days,
+                "receivable_terms": r_days,
+                "advance_in": 0.0,
+                "advance_out": 0.0
             })
             
-            # --- THE FIX: Thread-safe SQL insertion bypassing the unsafe helper query! ---
-            comp_id = getattr(state.view.winfo_toplevel(), "active_company_id", 1)
-            conn_id = database.get_connection()
-            cur_id = conn_id.cursor()
+            conn_ins = database.get_connection()
+            cur_ins = conn_ins.cursor()
+            cur_ins.execute("INSERT INTO customers (company_id, name, alias, phone, gstin, email, address) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            (comp_id, name, alias, final_phone, final_gstin, e_var.get().strip(), addr_json))
+            conn_ins.commit()
+            new_id = cur_ins.lastrowid
+            conn_ins.close()
             
-            cur_id.execute("INSERT INTO customers (company_id, name, alias, phone, gstin, email, address) VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                           (comp_id, name, alias, final_phone, final_gstin, e_var.get().strip(), addr_json))
-            conn_id.commit()
-            new_id = cur_id.lastrowid
-            
-            state_code = "00"
-            state_name = "N/A"
-            if st_var.get():
-                parts = st_var.get().split(", Code - ")
-                if len(parts) == 2:
-                    state_name = parts[0].strip()
-                    state_code = parts[1].strip()
-                    
-            cur_id.execute("UPDATE customers SET state=?, state_code=? WHERE id=?", (state_name, state_code, new_id))
-            conn_id.commit()
-            conn_id.close()
-            database.log_audit("Invoices", "Party Created", name, f"Quick-added party '{name}' during billing (Opening Bal: {ob_val} {ob_type})", ob_val, company_id=comp_id)
-            database.log_audit("Parties", "Created", name, f"Quick-added party '{name}' from Invoice screen (Opening Bal: {ob_val} {ob_type})", ob_val, company_id=comp_id)
-            # -----------------------------------------------------------------------------
+            state_val = st_var.get().strip()
+            state_code = state_val.split("Code - ")[1].strip() if "Code - " in state_val else ""
+            if new_id:
+                database.update_customer_tax_profile(new_id, state_val, state_code)
+                
+            disp_ref = f"{name} ({alias})" if alias else name
+            database.log_audit("Invoices", "Party Created", disp_ref, f"Quick-added party '{disp_ref}' during billing (Opening Bal: {ob_val} {ob_short})", ob_val, company_id=comp_id)
+            database.log_audit("Parties", "Created", disp_ref, f"Quick-added party '{disp_ref}' from Invoice screen (Opening Bal: {ob_val} {ob_short})", ob_val, company_id=comp_id)
             
             state.full_customers = database.get_all_customers()
-            state.customers = [str(c[1]).strip() for c in state.full_customers if len(c) > 1 and c[1]]
+            state.customers = []
+            state.cust_display_map = {}
+            for c_row in state.full_customers:
+                if len(c_row) > 1 and c_row[1]:
+                    db_n = str(c_row[1]).strip()
+                    al_n = str(c_row[8]).strip() if len(c_row) > 8 and c_row[8] else ""
+                    d_n = f"{db_n} ({al_n})" if (al_n and f"({al_n})" not in db_n) else db_n
+                    state.customers.append(d_n)
+                    state.cust_display_map[d_n] = {"name": db_n, "id": c_row[0]}
             state.cust_var.set(name)
-            lookup_customer_cb(name)
+            lookup_customer_cb(name, new_id)
             
             try: state.view.app.get_module("Customers").load_data()
             except: pass

@@ -493,7 +493,7 @@ def build_part_2(parent, state):
 
         def on_i_key(e):
             if e.keysym in ('Up', 'Down', 'Left', 'Right', 'Return', 'Tab', 'Escape'): return
-            val = item_var.get().replace("@@B@@", "").replace("@@U@@", "")
+            val = re.sub(r'(\[B\]|\[/B\]|\[U\]|\[/U\]|@@B@@|@@U@@)', '', item_var.get())
             all_items = list(state.inventory_data.keys())
             
             # --- THE FIX: Smart Sort - "Starts With" gets priority, then alphabetized! ---
@@ -582,10 +582,12 @@ def build_part_2(parent, state):
                 r1 = state.item_rows[idx]
                 r2 = state.item_rows[target]
                 
-                t1 = r1["widgets"][1].get("1.0", "end-1c")
-                t2 = r2["widgets"][1].get("1.0", "end-1c")
+                # --- THE FIX: Fetch the hidden text variable to preserve Bold/Underline tags! ---
+                t1 = r1["item"].get()
+                t2 = r2["item"].get()
                 r1["widgets"][1].set_text(t2)
                 r2["widgets"][1].set_text(t1)
+                # -------------------------------------------------------------------------------
                 
                 # --- THE FIX: Include 'sl_var' so the blank box travels, and auto-reindex! ---
                 for key in ["sl_var", "qty", "unit", "sac", "rate", "days", "amt"]:
@@ -630,6 +632,19 @@ def build_part_2(parent, state):
         action_f.grid(row=row_idx, column=col_offset, padx=2, pady=4, sticky="nsew")
 
         def handle_last_field_tab(event, current_row=current_row_payload):
+            
+            # --- THE FIX: Smooth Middle-Row Scroll Helper (Nudge down exactly 1 row instead of 4) ---
+            def force_middle_scroll():
+                widget = items_frame
+                while widget:
+                    if widget.winfo_class() == 'Canvas':
+                        widget.update_idletasks()
+                        widget.configure(scrollregion=widget.bbox("all"))
+                        widget.yview_scroll(1, "units")
+                        break
+                    widget = widget.master
+            # ----------------------------------------------------------------------------------------
+
             if state.item_rows[-1] == current_row:
                 add_item_row()
                 
@@ -642,11 +657,12 @@ def build_part_2(parent, state):
                         if widget.winfo_class() == 'Canvas':
                             widget.update_idletasks()
                             widget.configure(scrollregion=widget.bbox("all"))
-                            widget.yview_scroll(4, "units")
+                            # --- THE FIX: Force scrollbar to jump to the absolute bottom! ---
+                            widget.yview_moveto(1.0)
                             break
                         widget = widget.master
                         
-                items_frame.after(10, force_scroll)
+                items_frame.after(50, force_scroll)
                 return "break"
             else:
                 idx = state.item_rows.index(current_row)
@@ -657,6 +673,8 @@ def build_part_2(parent, state):
                 
                 if not nr_item and not nr_qty:
                     next_row["widgets"][1].focus_set()
+                    # --- THE FIX: Scroll down when jumping into an empty middle row ---
+                    items_frame.after(50, force_middle_scroll)
                     return "break"
                 
                 add_item_row()
@@ -666,16 +684,22 @@ def build_part_2(parent, state):
                     r_curr = state.item_rows[i]
                     r_prev = state.item_rows[i-1]
                     
-                    t_prev = r_prev["widgets"][1].get("1.0", "end-1c")
+                    # --- THE FIX: Fetch the hidden text variable to preserve Bold/Underline tags! ---
+                    t_prev = r_prev["item"].get()
                     r_curr["widgets"][1].set_text(t_prev)
+                    # --------------------------------------------------------------------------------
                     
-                    for key in ["qty", "unit", "sac", "rate", "days", "amt"]:
+                    # --- THE FIX: Add "sl_var" to the shift loop so blank serials travel downwards! ---
+                    for key in ["sl_var", "qty", "unit", "sac", "rate", "days", "amt"]:
                         r_curr[key].set(r_prev[key].get())
                         
                 state.is_swapping = False
                 
                 new_row = state.item_rows[idx+1]
                 new_row["widgets"][1].set_text("")
+                # --- THE FIX: Give it a temporary placeholder so the auto-reindexer doesn't skip it! ---
+                new_row["sl_var"].set("1") 
+                # ---------------------------------------------------------------------------------------
                 new_row["qty"].set("")
                 new_row["unit"].set("")
                 new_row["sac"].set("")
@@ -687,6 +711,8 @@ def build_part_2(parent, state):
                 state.calculate_totals()
                 
                 new_row["widgets"][1].focus_set()
+                # --- THE FIX: Scroll down when inserting a brand new middle row ---
+                items_frame.after(50, force_middle_scroll)
                 return "break"
 
         d_ent.bind("<Tab>", handle_last_field_tab)

@@ -42,7 +42,17 @@ class SubjectRichText(tk.Text):
         kwargs.setdefault("padx", 6)
         kwargs.setdefault("pady", 6)
         kwargs.setdefault("spacing3", 3)
+        
+        # --- THE FIX: Prevent Tkinter from stealing the highlight! ---
+        kwargs.setdefault("exportselection", False)
+        kwargs.setdefault("undo", True)
+        kwargs.setdefault("maxundo", 50)
+        # -------------------------------------------------------------
         super().__init__(master, **kwargs)
+        
+        # --- THE FIX: Hook up the universal copy/paste/select-all engine! ---
+        enable_copy_paste(self)
+        # --------------------------------------------------------------------
         
         self.textvariable = textvariable
         self.state = state
@@ -180,7 +190,11 @@ class SubjectRichText(tk.Text):
         if has_bold: prefix += "@@B@@"
         if has_under: prefix += "@@U@@"
         
+        # --- THE FIX: Block the listener from redrawing the text and wiping the selection! ---
+        self._is_syncing = True
         self.textvariable.set(prefix + raw_text)
+        self._is_syncing = False
+        # -------------------------------------------------------------------------------------
 
     def trigger_context_menu(self, event):
         theme = self.state.theme
@@ -643,7 +657,7 @@ def build_part_1(parent, state):
     cust_ent.bind("<Up>", on_cust_up)
     cust_ent.bind("<Down>", on_cust_down)
     cust_ent.bind("<Return>", on_cust_enter)
-    cust_ent.bind("<Tab>", lambda e: [cust_list.place_forget(), lookup_customer(state.cust_var.get()), "continue"])
+    cust_ent.bind("<Tab>", lambda e: [cust_list.place_forget(), lookup_customer(state.cust_var.get(), getattr(state, "cust_id", None)), "continue"])
     cust_list.bind("<ButtonRelease-1>", on_cust_click)
 
 
@@ -1155,10 +1169,15 @@ def build_part_1(parent, state):
     state.subj_text_widget = subj_ent
     
     # --- THE FIX: Subject Autocomplete Logic ---
-    subj_list = tk.Listbox(state.popup, font=("Arial", 11), bg=theme["bg"], fg=theme["text"], selectbackground=theme["accent_blue"], highlightthickness=1, highlightbackground=theme["border"])
+    subj_list = tk.Listbox(state.popup, font=("Arial", 11), bg=theme["bg"], fg=theme["text"], selectbackground=theme["accent_blue"], highlightthickness=1, highlightbackground=theme["border"], exportselection=False)
     
     def on_subj_key(e):
-        if e.keysym in ('Up', 'Down', 'Left', 'Right', 'Return', 'Escape', 'Tab', 'Alt_L', 'Alt_R'): return
+        if e.keysym in ('Up', 'Down', 'Left', 'Right', 'Return', 'Escape', 'Tab', 'Alt_L', 'Alt_R', 'Control_L', 'Control_R', 'Shift_L', 'Shift_R'): return
+        
+        # --- THE FIX: Bulletproof Ctrl Key Ignorer (Safe from NumLock) ---
+        if hasattr(e, 'state') and (e.state & 4): return 
+        # -----------------------------------------------------------------
+        
         val = state.subj_var.get().replace("@@B@@", "").replace("@@U@@", "").strip()
         hits = [s for s in state.historical_subjects if val.lower() in s.lower()] if val else state.historical_subjects
         if hits:
