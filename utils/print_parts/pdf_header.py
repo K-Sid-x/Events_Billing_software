@@ -81,7 +81,12 @@ def build_header(ctx, get_css):
     has_gst = ctx.get("has_gst", True)
     # ------------------------------------------------------------------------------------------
     
-    doc_title = "TAX INVOICE" if has_gst else "INVOICE"
+    # --- THE FIX: Print "BILL OF SUPPLY" if an IGST or CGST/SGST invoice has no taxes applied! ---
+    is_igst = ctx.get("is_igst", False)
+    tot_tax = ctx.get("ig", 0.0) if is_igst else (ctx.get("cg", 0.0) + ctx.get("sg", 0.0))
+    doc_title = "TAX INVOICE" if (has_gst and tot_tax > 0) else "BILL OF SUPPLY" if has_gst else "INVOICE"
+    # ---------------------------------------------------------------------------------------------
+    
     html += f'<div style="text-align: center; {c_title} margin-bottom: 10px; flex-shrink: 0;">{doc_title}</div>'
 
     cust_name = ctx.get('cust_name', '')

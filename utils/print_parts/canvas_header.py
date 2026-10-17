@@ -165,8 +165,17 @@ def draw_header(ctx):
     has_gst = bool(ctx["studio"].comp_dict.get('gst', ''))
     # ------------------------------------------------------
     
-    # Dynamically change the title based on GST status
-    doc_title = "TAX INVOICE" if has_gst else "INVOICE"
+    # --- THE FIX: Apply the 'BILL OF SUPPLY' logic to the Canvas Preview! ---
+    inv = studio.inv_data
+    is_igst = hasattr(studio, 'tax_type_var') and "Inter" in studio.tax_type_var.get()
+    if not is_igst:
+        is_igst = "Inter" in str(inv.get("tax_type", "")) or float(inv.get("igst", 0)) > 0
+        
+    tot_tax = ctx["parse_f"](inv.get("igst", 0)) if is_igst else (ctx["parse_f"](inv.get("cgst", 0)) + ctx["parse_f"](inv.get("sgst", 0)))
+    
+    doc_title = "TAX INVOICE" if (has_gst and tot_tax > 0) else "BILL OF SUPPLY" if has_gst else "INVOICE"
+    # ------------------------------------------------------------------------
+    
     c_txt(x_off + w/2, st["cy"], doc_title, "doc_title", anchor="n")
     
     st["cy"] += s(25)

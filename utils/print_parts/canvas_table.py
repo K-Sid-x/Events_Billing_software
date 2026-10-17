@@ -33,7 +33,13 @@ def draw_table(ctx):
 
     show_discount = int(inv.get("inc_discount", 0)) == 1
     show_advance = int(inv.get("inc_advance", 0)) == 1
-    is_igst = hasattr(ctx["studio"], 'gst_type') and ctx["studio"].gst_type.get() == "IGST"
+    
+    # --- THE FIX: Look at the new tax_type_var! ---
+    is_igst = hasattr(ctx["studio"], 'tax_type_var') and "Inter" in ctx["studio"].tax_type_var.get()
+    if not is_igst: # Fallback for saved preview windows
+        is_igst = "Inter" in str(inv.get("tax_type", "")) or float(inv.get("igst", 0)) > 0
+    # ----------------------------------------------
+        
     has_banks = bool(ctx["studio"].banks_data)
     
     inc_terms = int(inv.get("inc_terms", 1))
@@ -145,14 +151,43 @@ def draw_table(ctx):
         raw_name = str(it.get("name", ""))
         has_b = "@@B@@" in raw_name
         has_u = "@@U@@" in raw_name
-        clean_name = raw_name.replace("@@B@@", "").replace("@@U@@", "")
+        import re
+        clean_name = re.sub(r'(\[B\]|\[/B\]|\[U\]|\[/U\]|@@B@@|@@/B@@|@@U@@|@@/U@@)', '', raw_name)
         
-        # --- THE FIX: Let Tkinter calculate the EXACT pixel height of the wrapped text! ---
+        # --- THE FIX: Split Measurement Engine (Ignores Brackets) ---
+        # Separately measures the Left and Right text to calculate exact overlapping height!
+        valid_eq_idx = -1
+        p_count = 0
+        for i, char in enumerate(clean_name):
+            if char == '(': p_count += 1
+            elif char == ')': p_count = max(0, p_count - 1)
+            elif char == '=' and p_count == 0:
+                valid_eq_idx = i
+                break
+                
+        if valid_eq_idx != -1:
+            left_str = clean_name[:valid_eq_idx].strip()
+            right_str = clean_name[valid_eq_idx+1:].strip()
+            
+            ctx["cvs"].delete("dummy_meas")
+            c_txt(-5000, -5000, left_str, "tr_part", width=int(part_px_w - s(120)), bold=has_b, underline=has_u, tags=("dummy_meas",))
+            bbox_l = ctx["cvs"].bbox("dummy_meas")
+            h_l = (bbox_l[3] - bbox_l[1]) if bbox_l else s(15)
+            
+            ctx["cvs"].delete("dummy_meas")
+            c_txt(-5000, -5000, right_str, "tr_part", width=s(100), bold=has_b, underline=has_u, tags=("dummy_meas",))
+            bbox_r = ctx["cvs"].bbox("dummy_meas")
+            h_r = (bbox_r[3] - bbox_r[1]) if bbox_r else s(15)
+            
+            # The total cell height perfectly accounts for both sides wrapping
+            actual_text_h = max(h_l, h_r, h_l + h_r - s(15))
+        else:
+            ctx["cvs"].delete("dummy_meas")
+            c_txt(-5000, -5000, clean_name, "tr_part", width=int(part_px_w), bold=has_b, underline=has_u, tags=("dummy_meas",))
+            bbox_meas = ctx["cvs"].bbox("dummy_meas")
+            actual_text_h = (bbox_meas[3] - bbox_meas[1]) if bbox_meas else s(15)
         ctx["cvs"].delete("dummy_meas")
-        c_txt(-5000, -5000, clean_name, "tr_part", width=int(part_px_w), bold=has_b, underline=has_u, tags=("dummy_meas",))
-        bbox_meas = ctx["cvs"].bbox("dummy_meas")
-        actual_text_h = (bbox_meas[3] - bbox_meas[1]) if bbox_meas else s(15)
-        ctx["cvs"].delete("dummy_meas")
+        # ----------------------------------------
 
         # --- THE FIX: Tighter padding (4px) for a compact, professional look ---
         item_h = max(s(20), actual_text_h + s(4))
@@ -224,20 +259,75 @@ def draw_table(ctx):
 
         top_y = st["cy"] + s(3) 
         
-        # --- THE FIX: Line-by-Line Canvas Drawing (Strips Inline Tags) ---
+        # --- THE FIX: Advanced Line-by-Line Canvas Drawing ---
         curr_y = top_y
         import re
+        
+        right_text = ""
+        left_lines = []
+        has_equals = False
+        
         for line in raw_name.split('\n'):
-            l_b = "@@B@@" in line or "[B]" in line
-            l_u = "@@U@@" in line or "[U]" in line
+            # THE FIX: Parenthesis Tracker for Canvas Drawing
+            valid_eq_idx = -1
+            p_count = 0
+            for i, char in enumerate(line):
+                if char == '(': p_count += 1
+                elif char == ')': p_count = max(0, p_count - 1)
+                elif char == '=' and p_count == 0:
+                    valid_eq_idx = i
+                    break
+                    
+            if valid_eq_idx != -1 and not has_equals:
+                left_lines.append(line[:valid_eq_idx]) 
+                right_text = line[valid_eq_idx+1:].strip()
+                has_equals = True
+            else:
+                left_lines.append(line)
+                
+        pad_right = s(120) if has_equals else s(10)
+        
+        # --- THE FIX: Tag State Machine ---
+        # Remembers formatting if it spans across multiple lines!
+        active_b = False
+        active_u = False
+        last_b, last_u = False, False
+        
+        for line in left_lines:
+            if "[B]" in line or "@@B@@" in line: active_b = True
+            if "[U]" in line or "@@U@@" in line: active_u = True
             
-            c_line = line.replace("@@B@@", "").replace("@@U@@", "")
-            c_line = re.sub(r'\[/?(B|U)\]', '', c_line)
+            l_b = active_b
+            l_u = active_u
             
-            if c_line.strip() == "":
+            # If the tag closes on this line, we turn it off for the NEXT line
+            if "[/B]" in line or "@@/B@@" in line: active_b = False
+            if "[/U]" in line or "@@/U@@" in line: active_u = False
+            
+            # Clean all possible tag variations from the string
+            c_line = re.sub(r'(\[B\]|\[/B\]|\[U\]|\[/U\]|@@B@@|@@/B@@|@@U@@|@@/U@@)', '', line)
+            
+            clean_str = c_line.strip()
+            if clean_str == "":
                 curr_y += s(15) 
             else:
-                curr_y = c_txt(cxs[2] + s(5), curr_y, c_line, "tr_part", width=int((cxs[3]-cxs[2])-s(10)), max_w=(cxs[3]-cxs[2])-s(10), bold=l_b, underline=l_u)
+                last_b, last_u = l_b, l_u
+                curr_y = c_txt(cxs[2] + s(5), curr_y, c_line, "tr_part", width=int((cxs[3]-cxs[2])-pad_right), max_w=(cxs[3]-cxs[2])-pad_right, bold=l_b, underline=l_u)
+
+        if has_equals:
+            # Go up exactly 1 line height so the '=' aligns with the LAST line of the left text!
+            align_y = curr_y - s(15)
+            equals_x = cxs[3] - s(115)
+            
+            # THE FIX: Strip any trailing tags that got pushed to the right side of the split!
+            clean_right = re.sub(r'(\[B\]|\[/B\]|\[U\]|\[/U\]|@@B@@|@@/B@@|@@U@@|@@/U@@)', '', right_text).strip()
+            
+            # Draw the '=' and right text flowing DOWNWARDS from that alignment point
+            c_txt(equals_x, align_y, "=", "tr_part", anchor="nw", bold=last_b, underline=last_u)
+            val_x = equals_x + s(15)
+            right_val_y = c_txt(val_x, align_y, clean_right, "tr_part", width=s(100), max_w=s(100), anchor="nw", bold=last_b, underline=last_u)
+            
+            curr_y = max(curr_y, right_val_y)
         # -----------------------------------------------------------------
         
         c_txt(cxs[0] + (cxs[1]-cxs[0])/2, top_y, sl_val, "tr_slno", anchor="n", max_w=(cxs[1]-cxs[0])-s(4))

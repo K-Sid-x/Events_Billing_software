@@ -1,9 +1,11 @@
 import os
+import re
 import tempfile
 import webbrowser
 from tkinter import messagebox
 from utils.print_parts.pdf_calculator import build_pdf_context
 from utils.print_parts.pdf_builder import build_html
+from utils.print_parts.helpers import format_currency, fetch_global_settings
 
 def perform_print(studio):
     try: p_from = int(studio.e_from.get()); p_to = int(studio.e_to.get())
@@ -17,7 +19,8 @@ def perform_print(studio):
         ctx = build_pdf_context(studio, p_from, p_to)
         html_content = build_html(ctx)
 
-        inv_num_clean = studio.inv_data.get('inv_num', 'Invoice').replace('/', '_')
+        # Sanitize all restricted Windows filename characters
+        inv_num_clean = re.sub(r'[\\/*?:"<>|]', '_', str(studio.inv_data.get('inv_num', 'Invoice'))).strip() or "Invoice"
         
         # --- THE FIX: Added the 'Print_Studio_Voucher_' tag for the Sweeper! ---
         save_path = os.path.join(tempfile.gettempdir(), f"Print_Studio_Voucher_{inv_num_clean}.html")
@@ -33,7 +36,6 @@ def perform_print(studio):
 
 def send_to_whatsapp(studio):
     import urllib.parse
-    import re
     
     phone = studio.inv_data.get("cust_phone", "")
     phone = re.sub(r'Mobile:\s*', '', phone, flags=re.IGNORECASE).split(',')[0].strip()
@@ -43,7 +45,25 @@ def send_to_whatsapp(studio):
     # -----------------------------------------------------------------------
         
     inv_num = studio.inv_data.get("inv_num", "Invoice")
-    total_amt = studio.inv_data.get("total", "0.00")
+    
+    comp_id = 1
+    widget = studio
+    while widget:
+        if hasattr(widget, "active_company_id"):
+            comp_id = getattr(widget, "active_company_id")
+            break
+        widget = widget.master
+    curr_fmt, _ = fetch_global_settings(comp_id)
+
+    try: tot_val = float(studio.inv_data.get("total", 0.0) or 0.0)
+    except: tot_val = 0.0
+    try:
+        adv_val = float(studio.inv_data.get("advance_val", 0.0) or 0.0) if int(studio.inv_data.get("inc_advance", 0)) == 1 else 0.0
+    except:
+        adv_val = 0.0
+
+    net_due = max(0.0, tot_val - adv_val)
+    total_amt = format_currency(net_due, curr_fmt)
     
     msg = f"Hello!\n\nHere are the details for your recent transaction:\n*Invoice/Bill No:* {inv_num}\n*Amount Due:* {total_amt}\n\nPlease let us know if you need the formal PDF document.\n\nThank you for your business!"
     safe_msg = urllib.parse.quote(msg)

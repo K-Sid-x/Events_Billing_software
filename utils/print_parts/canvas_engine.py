@@ -72,8 +72,15 @@ def draw_pages(studio):
     try: start_page_num = int(studio.inv_data.get("page_num", 1))
     except: start_page_num = 1
 
-    # --- THE FIX: Fetch global settings for preview ---
-    global_curr, global_date_fmt = fetch_global_settings()
+    # --- THE FIX: Fetch global settings for the active company in preview ---
+    comp_id = 1
+    widget = studio
+    while widget:
+        if hasattr(widget, "active_company_id"):
+            comp_id = getattr(widget, "active_company_id")
+            break
+        widget = widget.master
+    global_curr, global_date_fmt = fetch_global_settings(comp_id)
 
     ctx = {
         "studio": studio, "cvs": studio.canvas, "s": s, "c_txt": c_txt,

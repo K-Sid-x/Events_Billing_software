@@ -50,7 +50,9 @@ def get_top_blocks(ctx, get_css, curr_format):
     
     if has_gst:
         inv = studio.inv_data
-        if ctx["is_igst"]:
+        
+        # --- THE FIX: Look at the exact "is_igst" flag calculated by pdf_engine! ---
+        if ctx.get("is_igst", False):
             ig_r = inv.get("igst_rate", "18")
             totals_html += f'<tr><td style="border: none; {css_totals} text-align: right; padding-right: 15px; padding-top: 1px; padding-bottom: 1px;">IGST @ {ig_r}% :</td><td style="border: none; {css_totals} text-align: right; padding-top: 1px; padding-bottom: 1px;">{format_currency(ctx["ig"], curr_format)}</td></tr>'
         else:
@@ -58,6 +60,7 @@ def get_top_blocks(ctx, get_css, curr_format):
             sg_r = inv.get("sgst_rate", "9")
             totals_html += f'<tr><td style="border: none; {css_totals} text-align: right; padding-right: 15px; padding-top: 1px; padding-bottom: 1px;">CGST @ {cg_r}% :</td><td style="border: none; {css_totals} text-align: right; padding-top: 1px; padding-bottom: 1px;">{format_currency(ctx["cg"], curr_format)}</td></tr>'
             totals_html += f'<tr><td style="border: none; {css_totals} text-align: right; padding-right: 15px; padding-top: 1px; padding-bottom: 1px;">SGST @ {sg_r}% :</td><td style="border: none; {css_totals} text-align: right; padding-top: 1px; padding-bottom: 1px;">{format_currency(ctx["sg"], curr_format)}</td></tr>'
+        # ---------------------------------------------------------------------------
     
     totals_html += f'<tr><td style="border: none; {css_totals} text-align: right; padding-right: 15px; padding-top: 1px; padding-bottom: 1px;">Round Off +/- :</td><td style="border: none; {css_totals} text-align: right; padding-top: 1px; padding-bottom: 1px;">{format_currency(ctx["round_off"], curr_format)}</td></tr>'
     totals_html += f'<tr><td colspan="2" style="border: none; padding: 0;"><div style="border-top: 1px solid #000; margin: 3px 0 4px 30%;"></div></td></tr>'

@@ -116,16 +116,22 @@ def build_pdf_context(studio, p_from, p_to):
     inv_date_raw = studio.inv_data.get('date', '')
     inv_date = smart_date_formatter(inv_date_raw, global_date_fmt) if inv_date_raw else ''
     
-    is_igst = hasattr(studio, 'gst_type') and studio.gst_type.get() == "IGST"
+    # --- THE FIX: Read the IGST flag securely from the new tax_type_var! ---
+    is_igst = hasattr(studio, 'tax_type_var') and "Inter" in studio.tax_type_var.get()
+    if not is_igst: # Fallback for saved preview windows
+        is_igst = "Inter" in str(studio.inv_data.get("tax_type", "")) or float(studio.inv_data.get("igst", 0)) > 0
+    # -----------------------------------------------------------------------
 
-    # --- THE FIX: STRICT SQL ISOLATION TO PREVENT DATA LEAKS ---
+    # --- THE FIX: STRICT SQL ISOLATION BY ID TO PREVENT SAME-NAME DATA LEAKS ---
     if cust_name and cust_name != "[CUSTOMER NOT SELECTED]":
         try:
-            import sqlite3
             conn = database.get_connection()
             c = conn.cursor()
-            
-            c.execute("SELECT id, name, phone, gstin, email, address FROM customers WHERE company_id=? AND LOWER(name)=?", (comp_id, str(cust_name).strip().lower()))
+            target_cid = studio.inv_data.get("cust_id")
+            if target_cid:
+                c.execute("SELECT id, name, phone, gstin, email, address FROM customers WHERE company_id=? AND id=?", (comp_id, target_cid))
+            else:
+                c.execute("SELECT id, name, phone, gstin, email, address FROM customers WHERE company_id=? AND LOWER(name)=?", (comp_id, str(cust_name).strip().lower()))
             row = c.fetchone()
             if row:
                 if not cust_phone:
@@ -135,7 +141,7 @@ def build_pdf_context(studio, p_from, p_to):
                 if not cust_addr: cust_addr = extract_address(str(row[5]).strip() if len(row) > 5 and row[5] else "")
             conn.close()
         except Exception: pass
-    # -----------------------------------------------------------
+    # ---------------------------------------------------------------------------
 
     if not cust_phone or str(cust_phone).strip().lower() in ["not provided", "none", "null", "not available", "not provided written in it", "na", "n/a", ""]: cust_phone = ""
     if not cust_gst or str(cust_gst).strip().lower() in ["not provided", "none", "null", "not available", "not provided written in it", "na", "n/a", ""]: cust_gst = ""
@@ -153,7 +159,7 @@ def build_pdf_context(studio, p_from, p_to):
     w_slno = cw.get("slno", 6); w_qty = cw.get("qty", 8)
     w_hsn = cw.get("hsn", 12); w_rate = cw.get("rate", 12)
     w_days = cw.get("days", 8); w_amt = cw.get("amt", 14)
-    w_part = max(5, 100 - sum([w_slno, w_qty, w_hsn, w_rate, w_days, w_amt]))
+    w_part = max(5, 100 - sum([w_slno, w_qty, w_hsn if has_gst else 0, w_rate, w_days, w_amt]))
 
     try: sub = float(studio.inv_data.get("subtotal", 0) or 0)
     except: sub = 0.0
@@ -240,7 +246,7 @@ def build_pdf_context(studio, p_from, p_to):
         
         font_sz = get_f("tr_part", 10)
         
-        cw_pct = max(0.05, 1.0 - sum([w_slno/100.0, w_qty/100.0, w_hsn/100.0, w_rate/100.0, w_days/100.0, w_amt/100.0]))
+        cw_pct = max(0.05, 1.0 - sum([w_slno/100.0, w_qty/100.0, (w_hsn/100.0) if has_gst else 0.0, w_rate/100.0, w_days/100.0, w_amt/100.0]))
         part_px_w = (cw_pct * (w - 2 * pad)) - 10
         chars_per_line = max(1, int(part_px_w / (font_sz * 0.55)))
         
@@ -248,20 +254,54 @@ def build_pdf_context(studio, p_from, p_to):
         current_page = []
         cy = header_h + 30 
         
+        import re
         for idx, item in enumerate(studio.items_data):
             it = item.get("data", {})
             raw_name = str(it.get("name", ""))
-            clean_name = raw_name.replace("@@B@@", "").replace("@@U@@", "")
+            clean_name = re.sub(r'(\[B\]|\[/B\]|\[U\]|\[/U\]|@@B@@|@@/B@@|@@U@@|@@/U@@)', '', raw_name)
             
-            lines = 0
-            for seg in clean_name.split('\n'):
-                seg_len = len(seg)
-                if seg_len == 0: lines += 1
-                else: lines += max(1, seg_len // chars_per_line + (1 if seg_len % chars_per_line > 0 else 0))
+            # --- THE FIX: HTML Exact Pagination Math for '=' Split (Ignores Brackets)! ---
+            valid_eq_idx = -1
+            p_count = 0
+            for i, char in enumerate(clean_name):
+                if char == '(': p_count += 1
+                elif char == ')': p_count = max(0, p_count - 1)
+                elif char == '=' and p_count == 0:
+                    valid_eq_idx = i
+                    break
+                    
+            if valid_eq_idx != -1:
+                left_str = clean_name[:valid_eq_idx].strip()
+                right_str = clean_name[valid_eq_idx+1:].strip()
                 
-            item_h = max(19, int(lines * font_sz * 1.2) + 4)
+                # HTML deducts ~85px for the fixed '=' block
+                cpl_left = max(1, int((part_px_w - 90) / (font_sz * 0.55)))
+                cpl_right = max(1, int(75 / (font_sz * 0.55)))
+                
+                lines_l = 0
+                for seg in left_str.split('\n'):
+                    seg_len = len(seg)
+                    if seg_len == 0: lines_l += 1
+                    else: lines_l += max(1, seg_len // cpl_left + (1 if seg_len % cpl_left > 0 else 0))
+                    
+                lines_r = max(1, len(right_str) // cpl_right + (1 if len(right_str) % cpl_right > 0 else 0))
+                lines = max(lines_l, lines_r)
+            else:
+                lines = 0
+                for seg in clean_name.split('\n'):
+                    seg_len = len(seg)
+                    if seg_len == 0: lines += 1
+                    else: lines += max(1, seg_len // chars_per_line + (1 if seg_len % chars_per_line > 0 else 0))
+            # ----------------------------------------------------------
+                
+            # TWEAK THIS: 2px top padding + 2px bottom padding + 2px border = 6
+            item_h = max(19, int(lines * font_sz * 1.2) + 6)
             
-            if cy + item_h > (h - 75):
+            # STAGE 1 (RESTORED): Item page break.
+            # TWEAKED: h - 90 forces the page to stop much earlier, 
+            # pushing that last squeezing item (like Sl 22) to the next page!
+            # BALANCED: h - 95 allows items to fill the page, but leaves EXACTLY enough room for the intermediate footer!
+            if cy + item_h > (h - 95):
                 pages.append(current_page)
                 current_page = []
                 cy = header_h + 30 + 35 
@@ -269,6 +309,9 @@ def build_pdf_context(studio, p_from, p_to):
             current_page.append(item)
             cy += item_h
             
+        # STAGE 2 (TWEAKED): Final Footer check.
+        # Lowered the safety margin from 110 to 90.
+        # This reclaims exactly 20 pixels of space, allowing 1 more item to squeeze in!
         if cy + dynamic_bottom_px > (h - 90):
             pages.append(current_page)
             pages.append([]) 

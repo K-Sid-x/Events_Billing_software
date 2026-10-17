@@ -6,7 +6,7 @@ def parse_f(val):
 
 def build_table(ctx, get_css, page_items, pg_num, running_total):
     studio = ctx["studio"]
-    curr_format = studio.settings.get("currency_format", "Indian Rupees (₹)")
+    curr_format = ctx.get("curr_format") or studio.settings.get("currency_format", "Indian Rupees (₹)")
     
     has_gst = ctx.get("has_gst", True)
     
@@ -60,20 +60,96 @@ def build_table(ctx, get_css, page_items, pg_num, running_total):
     for item in page_items:
         it = item.get("data", {})
         
-        # --- THE FIX: Line-by-Line HTML Rendering ---
+        # --- THE FIX: Smart Splitter (Respects UI Underline & Bold) ---
+        import re
         raw_name = str(it.get("name", ""))
         
-        # Convert true inline tags to HTML
-        html_name = raw_name.replace("@@B@@", "[B]").replace("@@U@@", "[U]") 
-        if "[B]" in html_name and "[/B]" not in html_name: html_name += "[/B]"
-        if "[U]" in html_name and "[/U]" not in html_name: html_name += "[/U]"
+        left_lines = []
+        right_text = ""
+        has_equals = False
+        gap_is_underlined = False
+        gap_is_bold = False
         
-        html_name = html_name.replace("[B]", "<span style='font-weight: bold;'>").replace("[/B]", "</span>")
-        html_name = html_name.replace("[U]", "<span style='text-decoration: underline; text-underline-offset: 3px; text-decoration-skip-ink: none;'>").replace("[/U]", "</span>")
-        
-        # Force HTML to render huge gaps perfectly
-        html_name = html_name.replace('\n', '<br>').replace("  ", "&nbsp;&nbsp;")
-        final_name_html = html_name
+        for line in raw_name.split('\n'):
+            # THE FIX: Parenthesis Tracker. Only split on '=' if it's outside brackets!
+            valid_eq_idx = -1
+            p_count = 0
+            for i, char in enumerate(line):
+                if char == '(': p_count += 1
+                elif char == ')': p_count = max(0, p_count - 1)
+                elif char == '=' and p_count == 0:
+                    valid_eq_idx = i
+                    break
+                    
+            if valid_eq_idx != -1 and not has_equals:
+                left_raw = line[:valid_eq_idx]
+                
+                # Detect if the UI underline or bold tag was left OPEN before the '=' sign
+                u_open = left_raw.count("@@U@@") + left_raw.count("[U]")
+                u_close = left_raw.count("@@/U@@") + left_raw.count("[/U]")
+                gap_is_underlined = (u_open > u_close)
+                
+                b_open = left_raw.count("@@B@@") + left_raw.count("[B]")
+                b_close = left_raw.count("@@/B@@") + left_raw.count("[/B]")
+                gap_is_bold = (b_open > b_close)
+                
+                # Strip trailing spaces so the CSS stretching line seamlessly connects to the last letter!
+                left_str = left_raw.rstrip()
+                
+                left_lines.append(left_str)
+                # THE FIX: Slice the right text perfectly using our new tracker
+                right_text = line[valid_eq_idx+1:].strip()
+                has_equals = True
+            else:
+                left_lines.append(line)
+                
+        def apply_html_tags(text_block):
+            t = text_block.replace("@@B@@", "[B]").replace("@@/B@@", "[/B]")
+            t = t.replace("@@U@@", "[U]").replace("@@/U@@", "[/U]")
+            
+            if "[B]" in t and "[/B]" not in t: t += "[/B]"
+            if "[U]" in t and "[/U]" not in t: t += "[/U]"
+            
+            t = t.replace("[B]", "<span style='font-weight: bold;'>").replace("[/B]", "</span>")
+            t = t.replace("[U]", "<span style='text-decoration: underline; text-underline-offset: 3px; text-decoration-skip-ink: none;'>").replace("[/U]", "</span>")
+            return t.replace("  ", "&nbsp;&nbsp;")
+            
+        if has_equals:
+            clean_right = re.sub(r'(\[B\]|\[/B\]|\[U\]|\[/U\]|@@B@@|@@/B@@|@@U@@|@@/U@@)', '', right_text).strip()
+            html_left = apply_html_tags("<br>".join(left_lines))
+            
+            if gap_is_underlined:
+                # THE FIX: Fuse the '=' and text into ONE single underlined string. Zero gaps allowed!
+                right_combined = f"=&nbsp;&nbsp;{clean_right}"
+                if gap_is_bold: right_combined = f"[B]{right_combined}[/B]"
+                right_combined = f"[U]{right_combined}[/U]"
+                html_right_combined = apply_html_tags(right_combined)
+                
+                final_name_html = f"""
+                <div style="display: flex; align-items: flex-end; width: 100%; height: 100%;">
+                    <div style="word-break: break-word; overflow-wrap: break-word; flex-shrink: 0;">{html_left}</div>
+                    <div style="flex-grow: 1; border-bottom: 1px solid #000; margin: 0 0 0px 0; min-width: 15px;"></div>
+                    <div style="flex-shrink: 0; width: 85px; text-align: left; word-break: break-all; overflow-wrap: anywhere;">
+                        {html_right_combined}
+                    </div>
+                </div>
+                """
+            else:
+                right_formatted = clean_right
+                if gap_is_bold: right_formatted = f"[B]{right_formatted}[/B]"
+                html_right = apply_html_tags(right_formatted)
+                
+                final_name_html = f"""
+                <div style="display: flex; align-items: flex-end; justify-content: space-between; width: 100%; height: 100%;">
+                    <div style="flex-grow: 1; padding-right: 15px; word-break: break-word; overflow-wrap: break-word;">{html_left}</div>
+                    <div style="flex-shrink: 0; width: 85px; display: flex; text-align: left;">
+                        <span style="margin-right: 5px;">=</span>
+                        <span style="flex-grow: 1; word-break: break-all; overflow-wrap: anywhere;">{html_right}</span>
+                    </div>
+                </div>
+                """
+        else:
+            final_name_html = f'<div style="word-break: break-word; overflow-wrap: break-word;">{apply_html_tags(raw_name.replace(chr(10), "<br>"))}</div>'
         # --------------------------------------------
 
         sl_val = str(item.get("idx", it.get("sl", ""))).strip()

@@ -62,6 +62,7 @@ def build_html(ctx):
                 height: 297mm !important; 
                 min-height: 297mm !important;
                 max-height: 297mm !important;
+                /* RESTORED: Back to the original 25px so the final page sits perfectly at the bottom! */
                 padding: 20px 20px 25px 20px; 
                 margin: 10px auto; 
                 background: white; 
@@ -125,7 +126,8 @@ def build_html(ctx):
             
             .invoice-table td {{ 
                 border-right: 0.75pt solid #000; 
-                padding: 1px 5px; 
+                /* TWEAK THIS: 2px is the top/bottom vertical space. 5px is the left/right space. */
+                padding: 2px 5px; 
                 vertical-align: top; 
                 line-height: 1.2; 
             }}
@@ -148,26 +150,37 @@ def build_html(ctx):
     <body>
     '''
 
-    running_total = 0.0
     try: start_page_num = int(inv.get("page_num", 1))
     except: start_page_num = 1
 
-    for pg_num, page_items in enumerate(pages_data):
-        is_last = (pg_num == len(pages_data) - 1)
-        curr_page_disp = start_page_num + pg_num
-        
-        main_html += f'<div class="page">'
-        
-        main_html += f'<div class="header-section">'
-        main_html += build_header(ctx, get_css)
-        main_html += f'</div>'
-        
-        # The wrapper is opened inside pdf_table.py and closed in pdf_footer.py!
-        table_html, running_total = build_table(ctx, get_css, page_items, pg_num, running_total)
-        main_html += table_html
-        main_html += build_footer(ctx, get_css, pg_num, is_last, curr_page_disp, running_total)
-        
-        main_html += "</div>"
+    p_from = int(ctx.get("p_from", 1) or 1)
+    p_to = int(ctx.get("p_to", len(pages_data)) or len(pages_data))
+
+    try:
+        copies = max(1, int(studio.sp_copies.get())) if hasattr(studio, "sp_copies") else 1
+    except Exception:
+        copies = 1
+
+    all_pages_html = ""
+    for _ in range(copies):
+        running_total = 0.0
+        for pg_num, page_items in enumerate(pages_data):
+            is_last = (pg_num == len(pages_data) - 1)
+            curr_page_disp = start_page_num + pg_num
+
+            # Always run build_table so running_total (B / F) stays 100% accurate even if earlier pages are skipped!
+            table_html, running_total = build_table(ctx, get_css, page_items, pg_num, running_total)
+
+            if p_from <= (pg_num + 1) <= p_to:
+                all_pages_html += '<div class="page">'
+                all_pages_html += '<div class="header-section">'
+                all_pages_html += build_header(ctx, get_css)
+                all_pages_html += '</div>'
+                all_pages_html += table_html
+                all_pages_html += build_footer(ctx, get_css, pg_num, is_last, curr_page_disp, running_total)
+                all_pages_html += "</div>"
+
+    main_html += all_pages_html
 
     main_html += '''
         <script>

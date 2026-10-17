@@ -79,8 +79,14 @@ def draw_footer(ctx):
     sgst_val = ctx["parse_f"](inv.get("sgst", 0))
     igst_val = ctx["parse_f"](inv.get("igst", 0))
     grand_tot = ctx["parse_f"](inv.get("total", 0))
-    raw_tot = taxable_val + (igst_val if hasattr(ctx["studio"], 'gst_type') and ctx["studio"].gst_type.get() == "IGST" else cgst_val + sgst_val)
-    is_igst = hasattr(ctx["studio"], 'gst_type') and ctx["studio"].gst_type.get() == "IGST"
+    
+    # --- THE FIX: Look at the new tax_type_var instead of the deleted gst_type variable! ---
+    is_igst = hasattr(ctx["studio"], 'tax_type_var') and "Inter" in ctx["studio"].tax_type_var.get()
+    if not is_igst: # Fallback for saved preview windows
+        is_igst = "Inter" in str(inv.get("tax_type", "")) or float(inv.get("igst", 0)) > 0
+        
+    raw_tot = taxable_val + (igst_val if is_igst else cgst_val + sgst_val)
+    # ----------------------------------------------------------------------------------------
     
     c_txt(lbl_x, right_y, "Sub Total :", "totals", anchor="ne")
     right_y = c_txt(tx, right_y, format_currency(sub_val, ctx["curr_format"]), "totals", anchor="ne")

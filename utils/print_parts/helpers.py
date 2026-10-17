@@ -249,7 +249,7 @@ def number_to_words(n, format_type=None):
         
     res = ""
     
-    if format_type in ["US Dollar ($)", "Euro (€)", "British Pound (£)", "Generic Number"]:
+    if any(k in str(format_type) for k in ("Dollar", "Euro", "Pound", "Generic")):
         n_temp = main_part
         if n_temp >= 1000000000: 
             res += get_words(n_temp // 1000000000) + "Billion "
@@ -375,7 +375,8 @@ def calculate_pagination(settings, items, page_h, top_space, sf, w, dynamic_bott
     for idx, item in enumerate(items, 1):
         it = item.get("data", {})
         name = str(it.get("name", ""))
-        clean_name = name.replace("@@B@@", "").replace("@@U@@", "")
+        import re
+        clean_name = re.sub(r'(\[B\]|\[/B\]|\[U\]|\[/U\]|@@B@@|@@U@@)', '', name)
         
         lines = 0
         for seg in clean_name.split('\n'):

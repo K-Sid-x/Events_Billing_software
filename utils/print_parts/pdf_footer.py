@@ -4,7 +4,7 @@ from utils.print_parts.footer_bottom import get_bottom_blocks
 
 def build_footer(ctx, get_css, pg_num, is_last, curr_page_disp, running_total):
     studio = ctx["studio"]
-    curr_format = studio.settings.get("currency_format", "Indian Rupees (₹)")
+    curr_format = ctx.get("curr_format") or studio.settings.get("currency_format", "Indian Rupees (₹)")
     dynamic_bottom_px = ctx.get("dynamic_bottom_px", 300) + 40
     cw_amt = float(studio.settings.get("col_widths", {}).get("amt", 14))
     
@@ -25,7 +25,7 @@ def build_footer(ctx, get_css, pg_num, is_last, curr_page_disp, running_total):
         </table>
         </div> <!-- CLOSES table-wrapper -->
         
-        <div class="footer-section" style="flex-shrink: 0; position: relative; min-height: 25px; margin-top: 5px;">
+        <div class="footer-section" style="flex-shrink: 0; position: relative; min-height: 25px;">
             <div style="position: absolute; bottom: 0; left: 0; right: 0; text-align: center;">
                 <span style="{css_page_no} line-height: 1; margin: 0; padding: 0;">Page {curr_page_disp}</span>
             </div>
