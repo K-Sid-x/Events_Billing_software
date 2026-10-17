@@ -37,7 +37,8 @@ class HomeView(tk.Frame):
         self.grid_manager = CompanyGridManager(self)
         self.alerts_manager = AlertsManager(self)
         
-        self.app.bind("<Control-n>", lambda e: open_create_popup(self) if getattr(self.app, "current_role", "") == "Admin" else None)
+        self.app.bind("<Control-n>", lambda e: open_create_popup(self) if (self.winfo_exists() and getattr(self.app, "current_role", "") == "Admin") else None)
+        self.app.bind("<Control-N>", lambda e: open_create_popup(self) if (self.winfo_exists() and getattr(self.app, "current_role", "") == "Admin") else None)
         
         self.nav_zone = "grid" 
         self.header_idx = 0
@@ -61,10 +62,7 @@ class HomeView(tk.Frame):
         self.colors = get_theme()
         self.config(bg=self.colors["bg"])
         
-        title_frame = tk.Frame(self, bg=self.colors["bg"], highlightthickness=0)
-        title_frame.pack(fill="x", pady=(30, 0))
-        title_frame.bind("<Button-1>", lambda e: self.focus_set())
-        tk.Label(title_frame, text="Home", font=("Segoe UI", 24, "bold"), bg=self.colors["bg"], fg=self.colors["text"]).pack(side="left")
+        
 
         self.header = tk.Frame(self, bg=self.colors["bg"], highlightthickness=0)
         self.header.pack(fill="x", pady=(20, 10))
@@ -72,13 +70,13 @@ class HomeView(tk.Frame):
         tk.Label(self.header, text="Command Center", font=("Segoe UI", 16, "bold"), bg=self.colors["bg"], fg=self.colors["text"]).pack(side="left")
         
         self.sort_outer = tk.Frame(self.header, bg=self.colors["border"], padx=1, pady=1, cursor="hand2")
-        self.sort_outer.pack(side="left", padx=20)
+        self.sort_outer.pack(side="left", padx=(12, 6))
         
         self.sort_inner = tk.Frame(self.sort_outer, bg=self.colors["btn"], cursor="hand2")
         self.sort_inner.pack(fill="both", expand=True)
 
-        self.lbl_sort = tk.Label(self.sort_inner, textvariable=self.sort_var, bg=self.colors["btn"], fg=self.colors["text"], font=("Segoe UI", 10, "bold"), width=18, anchor="w", cursor="hand2")
-        self.lbl_sort.pack(side="left", padx=(10, 5), pady=4)
+        self.lbl_sort = tk.Label(self.sort_inner, textvariable=self.sort_var, bg=self.colors["btn"], fg=self.colors["text"], font=("Segoe UI", 10, "bold"), width=15, anchor="w", cursor="hand2")
+        self.lbl_sort.pack(side="left", padx=(8, 4), pady=4)
         self.lbl_arrow = tk.Label(self.sort_inner, text="▼", bg=self.colors["btn"], fg=self.colors["text_sec"], font=("Segoe UI", 8), cursor="hand2")
         self.lbl_arrow.pack(side="right", padx=(0, 10))
         
@@ -93,9 +91,24 @@ class HomeView(tk.Frame):
         self.lbl_sort.bind("<Enter>", on_sort_enter); self.lbl_arrow.bind("<Enter>", on_sort_enter)
         self.lbl_sort.bind("<Button-1>", self.toggle_custom_sort_menu); self.lbl_arrow.bind("<Button-1>", self.toggle_custom_sort_menu); self.sort_inner.bind("<Button-1>", self.toggle_custom_sort_menu)
 
-        self.alerts = get_system_alerts()
+        # --- THE FIX: Show accurate permission-filtered alert count on the Home Screen ---
+        raw_alerts = get_system_alerts()
+        uid = getattr(self.app, "current_user_id", 1) or 1
+        if str(uid) != "1":
+            perms = database.get_user_permissions(uid)
+            allowed_comps = perms.get("companies", "all")
+            allowed_tabs = perms.get("sidebars", "all")
+            allowed_comp_set = {int(x) for x in allowed_comps} if isinstance(allowed_comps, list) else None
+            self.alerts = [
+                a for a in raw_alerts
+                if (allowed_comp_set is None or int(a.get("cid", 0)) in allowed_comp_set)
+                and (allowed_tabs == "all" or a.get("target_tab") in allowed_tabs)
+            ]
+        else:
+            self.alerts = raw_alerts
         bell_text = "🔔" if not self.alerts else f"🔔 ({len(self.alerts)})"
         bell_fg = self.colors["text_sec"] if not self.alerts else "#ef4444"
+        # ---------------------------------------------------------------------------------
         
         bell_frame, self.btn_bell = create_perfect_button(self.header, bell_text, ("Segoe UI", 10, "bold"), bell_fg, self.colors["btn"], self.colors["btn_hover"], self.colors["border"], self.alerts_manager.toggle_panel)
         bell_frame.pack(side="right", padx=(10, 0))
@@ -137,28 +150,8 @@ class HomeView(tk.Frame):
         u_pic = u_row[4] if (u_row and len(u_row) > 4 and u_row[4]) else ""
 
         home_font = ("Segoe UI", 24, "bold")
-        home_padx = self.header.pack_info().get("padx", 0)
-        home_pady = (20, 10)
-        for w in list(self.winfo_children()):
-            if isinstance(w, tk.Label) and "Home" in str(w.cget("text")):
-                home_font = w.cget("font")
-                p_info = w.pack_info()
-                home_padx = p_info.get("padx", home_padx)
-                home_pady = p_info.get("pady", home_pady)
-                w.destroy()
-                break
-            elif isinstance(w, tk.Frame) and w != self.header:
-                for child in list(w.winfo_children()):
-                    if isinstance(child, tk.Label) and "Home" in str(child.cget("text")):
-                        home_font = child.cget("font")
-                        p_info = w.pack_info()
-                        home_padx = p_info.get("padx", home_padx)
-                        home_pady = p_info.get("pady", home_pady)
-                        w.destroy()
-                        break
-
         title_row = tk.Frame(self, bg=self.colors["bg"])
-        title_row.pack(before=self.header, fill="x", padx=home_padx, pady=home_pady)
+        title_row.pack(before=self.header, fill="x", pady=(30, 0))
 
         tk.Label(title_row, text="Home", font=home_font, bg=self.colors["bg"], fg=self.colors["text"]).pack(side="left", anchor="w")
 
@@ -188,21 +181,31 @@ class HomeView(tk.Frame):
         
         if is_admin:
             security_frame, self.btn_security = create_perfect_button(self.header, "⚙️ Users & Security", ("Segoe UI", 10, "bold"), self.colors["text"], self.colors["btn"], self.colors["btn_hover"], self.colors["border"], lambda: open_security_manager(self))
-            security_frame.pack(side="right", padx=(10, 0))
+            self.btn_security.config(padx=9)
+            security_frame.pack(side="right", padx=(6, 0))
         # --------------------------------------------------------------------
 
         theme_frame, self.btn_theme = create_perfect_button(self.header, theme_txt, ("Segoe UI", 10, "bold"), theme_color, self.colors["btn"], self.colors["btn_hover"], self.colors["border"], self.toggle_theme)
-        theme_frame.pack(side="right", padx=(10, 0))
+        self.btn_theme.config(padx=9)
+        theme_frame.pack(side="right", padx=(6, 0))
 
         if is_admin:
             add_frame, self.btn_add = create_perfect_button(self.header, "+ Create Company", ("Segoe UI", 10, "bold"), "#ffffff", "#10b981", "#059669", "#10b981", lambda: open_create_popup(self))
-            add_frame.pack(side="right", padx=(10, 0))
+            self.btn_add.config(padx=10)
+            add_frame.pack(side="right", padx=(6, 0))
 
             export_frame, self.btn_export = create_perfect_button(self.header, "⭱ Export", ("Segoe UI", 10, "bold"), self.colors["text"], self.colors["btn"], self.colors["btn_hover"], self.colors["border"], lambda: open_export_popup(self))
-            export_frame.pack(side="right", padx=(10, 0))
+            self.btn_export.config(padx=9)
+            export_frame.pack(side="right", padx=(6, 0))
 
             import_frame, self.btn_import = create_perfect_button(self.header, "⭳ Import", ("Segoe UI", 10, "bold"), self.colors["text"], self.colors["btn"], self.colors["btn_hover"], self.colors["border"], lambda: trigger_import(self))
-            import_frame.pack(side="right", padx=(10, 0))
+            self.btn_import.config(padx=9)
+            import_frame.pack(side="right", padx=(6, 0))
+
+        self.btn_bell.config(padx=9)
+        bell_frame.pack_configure(padx=(6, 0))
+        self.btn_logout.config(padx=9)
+        logout_frame.pack_configure(padx=(6, 0))
 
         self.divider = tk.Frame(self, bg=self.colors["border"], height=1)
         self.divider.pack(fill="x", padx=20, pady=(0, 20)) 
@@ -369,13 +372,6 @@ class HomeView(tk.Frame):
         self.grid_manager.load_companies()
 
     def execute_card_click(self, cid, pin, target_tab="Dashboard"):
-        uid = getattr(self.app, "current_user_id", 1)
-        if str(uid) != "1":
-            perms = database.get_user_permissions(uid)
-            allowed_tabs = perms.get("sidebars", "all")
-            if isinstance(allowed_tabs, list) and target_tab not in allowed_tabs:
-                non_home = [t for t in allowed_tabs if t != "Home"]
-                target_tab = non_home[0] if non_home else "Home"
         self.grid_manager.execute_card_click(cid, pin, target_tab)
         
     def edit_company(self, cid, pin):

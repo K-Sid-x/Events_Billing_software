@@ -279,6 +279,11 @@ class Sidebar(tk.Frame):
 
     def sync_visibility(self):
         self.refresh_user_badge()
+        
+        # --- THE FIX: Save the scroll position before Tkinter unpacks the buttons ---
+        current_y = self.canvas.yview()[0]
+        # ----------------------------------------------------------------------------
+        
         try:
             app = self.winfo_toplevel()
             cid = getattr(app, "active_company_id", None)
@@ -334,9 +339,9 @@ class Sidebar(tk.Frame):
 
         self.update_idletasks()
         
-        # --- THE FIX: Instantly snap to the top when loading a new menu ---
-        self.canvas.yview_moveto(0.0)
-        # ------------------------------------------------------------------
+        # --- THE FIX: Restore the exact scroll position instead of jumping to the top ---
+        self.canvas.yview_moveto(current_y)
+        # --------------------------------------------------------------------------------
         
         self._bind_mouse_scroll()
 

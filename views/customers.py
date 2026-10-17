@@ -147,9 +147,14 @@ class CustomersView(tk.Frame):
         main_container.pack(fill="both", expand=True)
 
         header_f = tk.Frame(main_container, bg=self.colors["bg"])
-        header_f.pack(fill="x", pady=(0, 20))
+        header_f.pack(fill="x", pady=(25, 15))
         
-        tk.Label(header_f, text="Parties (Customers & Suppliers)", font=("Segoe UI", 20, "bold"), bg=self.colors["bg"], fg=self.colors["text"]).pack(anchor="w")
+        tk.Label(header_f, text="Parties (Customers & Suppliers)", font=("Segoe UI", 20, "bold"), bg=self.colors["bg"], fg=self.colors["text"]).pack(side="left", anchor="w")
+        try:
+            from views.audit_ui import attach_audit_button
+            attach_audit_button(header_f, default_tab="Parties")
+        except Exception:
+            pass
 
         action_bar = tk.Frame(main_container, bg=self.colors["card"], highlightbackground=self.colors["border"], highlightthickness=1, padx=15, pady=10)
         action_bar.pack(fill="x", pady=(0, 20))
@@ -464,7 +469,7 @@ class CustomersView(tk.Frame):
         self.update_bulk_visuals()
 
     def select_all_bulk(self):
-        all_items = [child for child in self.tree.get_children() if not str(child).startswith("empty_")]
+        all_items = [child for child in self.tree.get_children() if not str(child).startswith("empty_") and not str(child).startswith("dummy_")]
         if len(self.selected_items) == len(all_items) and len(all_items) > 0:
             self.selected_items.clear()
         else:
@@ -487,7 +492,7 @@ class CustomersView(tk.Frame):
                 self.btn_select_all.config(text=f"☑ Select All ({len(self.selected_items)})")
                 
         for item in self.tree.get_children():
-            if str(item).startswith("empty_"): continue
+            if str(item).startswith("empty_") or str(item).startswith("dummy_"): continue
             tags = list(self.tree.item(item, "tags"))
             if "bulk_sel" in tags: tags.remove("bulk_sel")
             current_vals = list(self.tree.item(item, "values"))
@@ -774,13 +779,24 @@ class CustomersView(tk.Frame):
     def load_data(self, event=None):
         for item in self.tree.get_children(): self.tree.delete(item)
         
-        # --- THE FIX: Direct strict query pulling ALIAS for the display grid ---
+        # --- THE FIX: Batch-fetch all customers & balances in 1 connection (O(1) queries) ---
+        sales_bal_map = {}
+        purch_bal_map = {}
         try:
             comp_id = getattr(self.app, "active_company_id", 1)
             conn = database.get_connection()
             cur = conn.cursor()
             cur.execute("SELECT id, name, phone, gstin, email, address, state, state_code, alias FROM customers WHERE company_id=?", (comp_id,))
             customers = cur.fetchall()
+            
+            cur.execute("SELECT customer_id, SUM(balance_due) FROM invoices WHERE company_id=? AND is_deleted=0 AND status != 'Draft' GROUP BY customer_id", (comp_id,))
+            for r_cid, r_sum in cur.fetchall():
+                if r_cid is not None: sales_bal_map[int(r_cid)] = float(r_sum or 0.0)
+                
+            cur.execute("SELECT vendor_id, SUM(balance_due) FROM purchases WHERE company_id=? AND is_deleted=0 AND is_draft=0 GROUP BY vendor_id", (comp_id,))
+            for r_vid, r_sum in cur.fetchall():
+                if r_vid is not None: purch_bal_map[int(r_vid)] = float(r_sum or 0.0)
+                
             conn.close()
         except:
             customers = []
@@ -795,40 +811,41 @@ class CustomersView(tk.Frame):
         
         records = []
         for c in customers:
-            cust_id = c[0]
+            cust_id = int(c[0])
             customer_name = str(c[1])
             alias = str(c[8]).strip() if len(c) > 8 and c[8] else ""
             
-            # --- THE FIX: Check if hidden and skip for staff ---
-            raw_addr = str(c[5]) if len(c) > 5 and c[5] else ""
-            is_hidden = False
-            if raw_addr and raw_addr.strip().startswith("{"):
-                try: is_hidden = json.loads(raw_addr).get("hidden_from_staff", False)
-                except: pass
+            raw_addr = str(c[5]).strip() if len(c) > 5 and c[5] else ""
+            j_addr = {}
+            if raw_addr.startswith("{"):
+                try: j_addr = json.loads(raw_addr)
+                except: j_addr = {}
                 
+            is_hidden = bool(j_addr.get("hidden_from_staff", False))
             if is_hidden and not is_admin:
                 continue
                 
-            display_name = f"{customer_name} ({alias})" if alias else customer_name
-            
-            # --- THE FIX: Use secure Database ID for math engine! ---
-            total_due = self.get_customer_balance(cust_id)
+            # Calculate Net Balance in memory from batch maps + parsed JSON
+            raw_ob = float(j_addr.get("opening_balance", 0.0) or 0.0)
+            ob_paid = float(j_addr.get("ob_paid", 0.0) or 0.0)
+            ob_val = max(0.0, raw_ob - ob_paid)
+            if not str(j_addr.get("ob_type", "They Owe You (Dr)")).startswith("They"):
+                ob_val = -ob_val
+            adv_in = float(j_addr.get("advance_in", j_addr.get("advance_wallet", 0.0)) or 0.0)
+            adv_out = float(j_addr.get("advance_out", 0.0) or 0.0)
+            s_pend = sales_bal_map.get(cust_id, 0.0)
+            p_pend = purch_bal_map.get(cust_id, 0.0)
+            total_due = ob_val + s_pend - p_pend - adv_in + adv_out
             
             if hide_settled and round(total_due, 2) == 0.00: continue
             if filter_opt == "Receivables (They Owe You)" and total_due <= 0: continue
             if filter_opt == "Payables (You Owe Them)" and total_due >= 0: continue
 
-            pan_val = "Not Provided"
-            raw_addr = str(c[5]) if len(c) > 5 and c[5] else ""
-            if raw_addr and raw_addr.strip().startswith("{"):
-                try:
-                    pan_val = str(json.loads(raw_addr).get("pan", "Not Provided"))
-                    if not pan_val.strip(): pan_val = "Not Provided"
-                except: pass
+            pan_val = str(j_addr.get("pan", "Not Provided") or "Not Provided").strip() or "Not Provided"
 
             if search:
-                phone_str, gstin_str, pan_str = str(c[2]).lower(), str(c[3]).lower(), pan_val.lower()
-                if not (search in customer_name.lower() or search in phone_str or search in gstin_str or search in pan_str): continue
+                phone_str, gstin_str, pan_str, alias_str = str(c[2]).lower(), str(c[3]).lower(), pan_val.lower(), alias.lower()
+                if not (search in customer_name.lower() or search in alias_str or search in phone_str or search in gstin_str or search in pan_str): continue
 
             raw_phone = str(c[2]) if c[2] and c[2] != "None" else ""
             display_phone = ""
@@ -1258,7 +1275,51 @@ class CustomersView(tk.Frame):
             conn = database.get_connection()
             c = conn.cursor()
 
-            # 1. Pre-check for GST Locked Invoices
+            # --- THE FIX: Smart Debit Note Interceptor for Single Selection ---
+            if len(valid_ids) == 1:
+                pid_single = valid_ids[0]
+                c.execute("SELECT mode, ref, amount, pay_type, party_name, party_id FROM party_payments WHERE id=?", (pid_single,))
+                pay_info = c.fetchone()
+                if pay_info:
+                    p_mode, p_ref, p_amt, p_type, p_party_name, p_party_id = pay_info
+                    if p_mode in ("System Reversal", "System Adjustment") and ("Debit Note" in str(p_ref) or "Advance Wallet" in str(p_ref)):
+                        import re
+                        b_num = ""
+                        m = re.search(r'\|\s*(.*?)\s*\(', str(p_ref))
+                        if m: b_num = m.group(1).strip()
+                        if b_num:
+                            if not messagebox.askyesno("Reverse Debit Note", f"This will completely reverse the Debit Note/Return for Bill #{b_num}.\n\nContinue?", parent=pop):
+                                conn.close()
+                                return
+                            c.execute("SELECT id FROM party_payments WHERE company_id=? AND mode IN ('System Reversal', 'System Adjustment') AND ref LIKE ? AND ABS(amount) = ?",
+                                      (self.comp_id, f"%| {b_num} (%", abs(float(p_amt or 0.0))))
+                            twin_ids = [r[0] for r in c.fetchall()]
+                            try:
+                                if p_party_id:
+                                    c.execute("SELECT id, address FROM customers WHERE id=? AND company_id=?", (p_party_id, self.comp_id))
+                                else:
+                                    c.execute("SELECT id, address FROM customers WHERE name=? AND company_id=?", (p_party_name, self.comp_id))
+                                c_row = c.fetchone()
+                                if c_row:
+                                    c_id, raw_addr = c_row[0], c_row[1]
+                                    try: j_data = json.loads(raw_addr)
+                                    except: j_data = {}
+                                    pocket = "advance_out" if p_type == 'make' else "advance_in"
+                                    curr_adv = float(j_data.get(pocket, j_data.get("advance_wallet", 0.0)))
+                                    j_data[pocket] = curr_adv + abs(float(p_amt or 0.0))
+                                    c.execute("UPDATE customers SET address=? WHERE id=?", (json.dumps(j_data), c_id))
+                                    conn.commit()
+                            except Exception: pass
+                            conn.close()
+                            for t_id in twin_ids:
+                                try: database.delete_party_payment(t_id, self.comp_id, bypass_rules=True)
+                                except Exception: pass
+                            load_payments()
+                            if hasattr(self, 'load_data'): self.load_data()
+                            return
+            # ------------------------------------------------------------------
+
+            # 1. Pre-check for GST Locked Invoices & Purchases
             for pid in valid_ids:
                 c.execute("SELECT ref FROM party_payments WHERE id=?", (pid,))
                 ref_row = c.fetchone()
@@ -1268,20 +1329,17 @@ class CustomersView(tk.Frame):
                         c.execute("SELECT ca_submitted FROM invoices WHERE invoice_number=? AND company_id=?", (b_num, self.comp_id))
                         inv_row = c.fetchone()
                         if inv_row and inv_row[0] == 1:
-                            import tkinter.messagebox as messagebox
                             messagebox.showwarning("Locked", f"Payment deletion blocked.\n\nThis payment is linked to Invoice {b_num}, which is already GST Filed.", parent=pop)
                             conn.close()
                             return
                         c.execute("SELECT ca_submitted FROM purchases WHERE bill_number=? AND company_id=?", (b_num, self.comp_id))
                         purch_row = c.fetchone()
                         if purch_row and purch_row[0] == 1:
-                            import tkinter.messagebox as messagebox
                             messagebox.showwarning("Locked", f"Payment deletion blocked.\n\nThis payment is linked to Purchase {b_num}, which is already GST Filed.", parent=pop)
                             conn.close()
                             return
             conn.close()
             
-            import tkinter.messagebox as messagebox
             msg = "Are you sure you want to delete this payment record?\n\nThis will permanently reverse the payment, restoring the invoice/purchase balance and adjusting the advance wallet accordingly."
             if len(valid_ids) > 1:
                 msg = f"Are you sure you want to bulk delete {len(valid_ids)} payment records?\n\nThis will permanently reverse the payments, restoring balances and advance wallets accordingly."
@@ -1291,23 +1349,14 @@ class CustomersView(tk.Frame):
                 
             try:
                 for pid in valid_ids:
-                    conn_a = database.get_connection()
-                    cur_a = conn_a.cursor()
-                    cur_a.execute("SELECT party_name, ref, amount, mode FROM party_payments WHERE id=?", (pid,))
-                    p_row = cur_a.fetchone()
-                    conn_a.close()
+                    # database.delete_party_payment automatically logs the deletion to Audit Logs
                     database.delete_party_payment(pid, self.comp_id)
-                    if p_row:
-                        database.log_audit(
-                            "Parties", "Payment Deleted", p_row[0] or "Party",
-                            f"Reversed payment ({p_row[3]}) • Ref: {p_row[1]}",
-                            abs(float(p_row[2] or 0.0)), company_id=self.comp_id
-                        )
                     
                 load_payments()
                 if hasattr(self, 'load_data'): self.load_data()
+            except ValueError as ve:
+                messagebox.showerror("Access Denied", str(ve), parent=pop)
             except Exception as e:
-                import tkinter.messagebox as messagebox
                 messagebox.showerror("Database Error", str(e), parent=pop)
 
         ctx_menu = tk.Menu(pop, tearoff=0, font=("Arial", 10), bg=self.colors["card"], fg=self.colors["text"], activebackground=self.colors["accent_blue"], activeforeground="#ffffff")
@@ -1352,11 +1401,35 @@ class CustomersView(tk.Frame):
         def load_payments(*args):
             for i in p_tree.get_children(): p_tree.delete(i)
             
+            is_admin = (getattr(self.app, "current_role", "Admin") == "Admin")
             conn = database.get_connection()
             c = conn.cursor()
-            c.execute("SELECT id, pay_date, party_name, mode, ref, amount, notes, pay_type FROM party_payments WHERE company_id=? ORDER BY id DESC", (self.comp_id,))
-            rows = c.fetchall()
+            
+            hidden_ids = set()
+            hidden_names = set()
+            if not is_admin:
+                c.execute("SELECT id, name, address FROM customers WHERE company_id=?", (self.comp_id,))
+                for cid_r, cname_r, caddr_r in c.fetchall():
+                    if caddr_r and str(caddr_r).strip().startswith("{"):
+                        try:
+                            if json.loads(caddr_r).get("hidden_from_staff", False):
+                                hidden_ids.add(int(cid_r))
+                                if cname_r: hidden_names.add(str(cname_r).strip().lower())
+                        except Exception:
+                            pass
+
+            c.execute("SELECT id, pay_date, party_name, mode, ref, amount, notes, pay_type, party_id FROM party_payments WHERE company_id=? ORDER BY id DESC", (self.comp_id,))
+            raw_rows = c.fetchall()
             conn.close()
+
+            rows = []
+            for r in raw_rows:
+                if not is_admin:
+                    pid_val = r[8]
+                    pname_val = str(r[2] or "").strip().lower()
+                    if (pid_val and int(pid_val) in hidden_ids) or (not pid_val and pname_val in hidden_names):
+                        continue
+                rows.append(r[:8])
 
             search = search_var.get().lower()
             val = filter_var.get()

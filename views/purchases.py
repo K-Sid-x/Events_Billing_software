@@ -251,9 +251,19 @@ class PurchasesView(tk.Frame):
 
         tk.Button(self.custom_date_f, text="✖", font=("Arial", 9, "bold"), bg=self.colors.get("error", "#ef4444"), fg="#ffffff", relief="flat", cursor="hand2", command=clear_custom_filter).pack(side="left", padx=(10, 0))
 
-        # Auto-trigger grid reload the instant dates change
-        self.from_var.trace_add("write", lambda *args: self.load_data() if self.filter_var.get() == "Custom Date Range" else None)
-        self.to_var.trace_add("write", lambda *args: self.load_data() if self.filter_var.get() == "Custom Date Range" else None)
+        # Auto-trigger grid reload only when a date is cleared or fully typed/selected
+        def _on_custom_date_write(*args):
+            if self.filter_var.get() != "Custom Date Range":
+                return
+            f_val, t_val = self.from_var.get().strip(), self.to_var.get().strip()
+            f_ok = (not f_val) or len(f_val) == 10
+            t_ok = (not t_val) or len(t_val) == 10
+            if f_ok and t_ok:
+                self.current_page = 1
+                self.load_data()
+
+        self.from_var.trace_add("write", _on_custom_date_write)
+        self.to_var.trace_add("write", _on_custom_date_write)
         # ----------------------------------------------------------------------------
 
         self.right_toolbar = tk.Frame(toolbar_container, bg=self.colors["bg"])
@@ -534,9 +544,10 @@ class PurchasesView(tk.Frame):
                     
                     if messagebox.askyesno("Delete Draft", "Permanently vaporize this draft? This cannot be undone.", parent=pop):
                         conn = database.get_connection()
-                        conn.cursor().execute("DELETE FROM purchase_items WHERE purchase_id=?", (iid,))
-                        # --- THE FIX: Added company_id lock ---
+                        # --- THE FIX: Walled off Draft Deletions strictly to the Active Company ---
+                        conn.cursor().execute("DELETE FROM purchase_items WHERE purchase_id IN (SELECT id FROM purchases WHERE id=? AND company_id=?)", (iid, self.comp_id))
                         conn.cursor().execute("DELETE FROM purchases WHERE id=? AND company_id=?", (iid, self.comp_id))
+                        # --------------------------------------------------------------------------
                         conn.commit()
                         conn.close()
                         load_drafts()
@@ -787,66 +798,104 @@ class PurchasesView(tk.Frame):
         if self.is_bulk_mode: return
         iid = self.tree.identify_row(event.y)
         if iid and "empty" not in self.tree.item(iid, "tags"):
-            self.tree.selection_set(iid)
+            # --- THE FIX: Preserve native multi-selection on right click! ---
+            if iid not in self.tree.selection():
+                self.tree.selection_set(iid)
+            # ----------------------------------------------------------------
             
             self.ctx_menu.delete(0, "end")
             
-            rec_path = ""
-            is_locked = False
-            
-            # --- THE FIX: Hyper-clean database query mimicking invoices.py ---
-            try:
-                conn = database.get_connection()
-                c = conn.cursor()
-                c.execute("SELECT receipt_path, ca_submitted, amount_paid, write_off FROM purchases WHERE id=?", (iid,))
-                row = c.fetchone()
-                conn.close()
+            # --- THE FIX: Count actual natively selected items ---
+            selected_items = [item for item in self.tree.selection() if 'empty' not in self.tree.item(item, 'tags')]
+            sel_count = len(selected_items)
+            # -----------------------------------------------------
+
+            if sel_count <= 1:
+                rec_path = ""
+                is_locked = False
                 
-                if row:
-                    rec_path = row[0] if row[0] else ""
-                    is_locked = (row[1] == 1)
-                    has_payments = (float(row[2] or 0.0) > 0.01 or float(row[3] or 0.0) > 0.01)
-                else:
-                    rec_path = ""
+                try:
+                    conn = database.get_connection()
+                    c = conn.cursor()
+                    c.execute("SELECT receipt_path, ca_submitted, amount_paid, write_off FROM purchases WHERE id=?", (iid,))
+                    row = c.fetchone()
+                    conn.close()
+                    
+                    if row:
+                        rec_path = row[0] if row[0] else ""
+                        is_locked = (row[1] == 1)
+                        has_payments = (float(row[2] or 0.0) > 0.01 or float(row[3] or 0.0) > 0.01)
+                    else:
+                        rec_path = ""
+                        is_locked = False
+                        has_payments = False
+                except: 
                     is_locked = False
                     has_payments = False
-            except: 
-                is_locked = False
-                has_payments = False
-                rec_path = ""
-            
-            # --- THE FIX: Bulletproof warning popups attached to the root window ---
-            if is_locked:
-                self.ctx_menu.add_command(label="🔒 Cannot Edit (GST Filed)", foreground=self.colors["error"], command=lambda: messagebox.showwarning("GST Filed", "This bill is marked as 'GST Filed' and cannot be edited.", parent=self.winfo_toplevel()))
-            elif has_payments:
-                self.ctx_menu.add_command(label="🔒 Cannot Edit (Payment Attached)", foreground=self.colors["error"], command=lambda: messagebox.showwarning("Payment Attached", "Cannot edit this bill because it has payments or write-offs attached.\n\nPlease go to the vendor's Ledger and delete the payment records before editing.", parent=self.winfo_toplevel()))
-            else:
-                self.ctx_menu.add_command(label="✏ Edit Record", command=self.ctx_edit)
+                    rec_path = ""
                 
-            # --- THE FIX: Added Duplicate/Clone Button ---
-            self.ctx_menu.add_command(label="⎘ Duplicate / Clone", command=self.ctx_clone)
-            # ---------------------------------------------
-            
-            self.ctx_menu.add_command(label="👁 Preview Bill", command=self.ctx_preview)
-            
-            if rec_path and os.path.exists(rec_path):
+                if is_locked:
+                    self.ctx_menu.add_command(label="🔒 Cannot Edit (GST Filed)", foreground=self.colors["error"], command=lambda: messagebox.showwarning("GST Filed", "This bill is marked as 'GST Filed' and cannot be edited.", parent=self.winfo_toplevel()))
+                elif has_payments:
+                    self.ctx_menu.add_command(label="🔒 Cannot Edit (Payment Attached)", foreground=self.colors["error"], command=lambda: messagebox.showwarning("Payment Attached", "Cannot edit this bill because it has payments or write-offs attached.\n\nPlease go to the vendor's Ledger and delete the payment records before editing.", parent=self.winfo_toplevel()))
+                else:
+                    self.ctx_menu.add_command(label="✏ Edit Record", command=self.ctx_edit)
+                    
+                self.ctx_menu.add_command(label="⎘ Duplicate / Clone", command=self.ctx_clone)
+                self.ctx_menu.add_command(label="👁 Preview Bill", command=self.ctx_preview)
+                
+                if rec_path and os.path.exists(rec_path):
+                    self.ctx_menu.add_separator()
+                    self.ctx_menu.add_command(label="🖼️ View Attached Receipt", command=lambda p=rec_path: self.ctx_view_receipt(p))
+                
                 self.ctx_menu.add_separator()
-                self.ctx_menu.add_command(label="🖼️ View Attached Receipt", command=lambda p=rec_path: self.ctx_view_receipt(p))
-            
-            self.ctx_menu.add_separator()
-            
-            if is_locked:
-                self.ctx_menu.add_command(label="🔒 Cannot Return (GST Filed)", foreground=self.colors["error"], command=lambda: messagebox.showwarning("GST Filed", "This bill is marked as 'GST Filed' and cannot be returned.", parent=self.winfo_toplevel()))
-            else:
+                
+                # --- THE FIX: Unlocked Debit Notes for GST Filed Bills ---
                 self.ctx_menu.add_command(label="🔙 Record Return / Debit Note", command=self.ctx_debit_note)
-            
-            self.ctx_menu.add_separator()
-            self.ctx_menu.add_command(label="📄 Bulk Export", command=lambda: self.toggle_bulk_mode("export"))
-            
-            if is_locked:
-                self.ctx_menu.add_command(label="🔒 Cannot Delete (GST Filed)", foreground=self.colors["error"], command=lambda: messagebox.showwarning("GST Filed", "This bill is marked as 'GST Filed' and cannot be deleted.", parent=self.winfo_toplevel()))
+                # ---------------------------------------------------------
+                
+                self.ctx_menu.add_separator()
+                self.ctx_menu.add_command(label="🖨 Bulk Print / Export Mode", command=lambda: self.toggle_bulk_mode("export"))
+                
+                if is_locked:
+                    self.ctx_menu.add_command(label="🔒 Cannot Bulk Delete (GST Filed)", foreground=self.colors["error"], command=lambda: messagebox.showwarning("GST Filed", "This bill is marked as 'GST Filed'. Bulk deletion involves locked documents.", parent=self.winfo_toplevel()))
+                else:
+                    self.ctx_menu.add_command(label="🗑 Bulk Delete Mode", command=lambda: self.toggle_bulk_mode("delete"))
             else:
-                self.ctx_menu.add_command(label="🗑 Bulk Delete", command=lambda: self.toggle_bulk_mode("delete"))
+                # --- THE FIX: The New Native Multi-Select Menu for Purchases! ---
+                def quick_print():
+                    self.selected_bulk_ids = set(str(item_id) for item_id in selected_items)
+                    self.is_bulk_mode = True 
+                    self.execute_bulk_action("full_pdf")
+
+                def quick_csv():
+                    self.selected_bulk_ids = set(str(item_id) for item_id in selected_items)
+                    self.is_bulk_mode = True 
+                    self.execute_bulk_action("export_csv")
+                    
+                def quick_delete():
+                    self.selected_bulk_ids = set(str(item_id) for item_id in selected_items)
+                    self.is_bulk_mode = True 
+                    self.bulk_action_type = "delete"
+                    self.execute_bulk_action("delete")
+
+                def enter_visual_bulk(mode):
+                    self.toggle_bulk_mode(mode)
+                    self.selected_bulk_ids = set(str(item_id) for item_id in selected_items)
+                    self.load_data()
+                    if hasattr(self, "btn_bulk_del") and self.btn_bulk_del.winfo_exists(): 
+                        self.btn_bulk_del.config(text=f"🗑 Delete Selected ({len(self.selected_bulk_ids)})")
+                    if hasattr(self, "btn_select_all") and self.btn_select_all.winfo_exists():
+                        self.btn_select_all.config(text=f"☑ Select All ({len(self.selected_bulk_ids)})")
+                
+                self.ctx_menu.add_command(label=f"🖨 Instant Print {sel_count} Full Bills", command=quick_print)
+                self.ctx_menu.add_command(label=f"📄 Instant Export {sel_count} to CSV", command=quick_csv)
+                self.ctx_menu.add_command(label=f"🗑 Instant Delete {sel_count} Bills", foreground=self.colors["error"], command=quick_delete)
+                
+                self.ctx_menu.add_separator()
+                self.ctx_menu.add_command(label="🖨 Review in Bulk Print/Export Mode", command=lambda: enter_visual_bulk("export"))
+                self.ctx_menu.add_command(label="🗑 Review in Bulk Delete Mode", command=lambda: enter_visual_bulk("delete"))
+                # --------------------------------------------------
                 
             self.ctx_menu.post(event.x_root, event.y_root)
 
@@ -1041,9 +1090,10 @@ class PurchasesView(tk.Frame):
                 self.btn_bulk_del = tk.Button(self.bulk_actions, text="🗑 Delete Selected (0)", font=("Segoe UI", 9, "bold"), bg=self.colors["error"], fg="#ffffff", command=lambda: self.execute_bulk_action("delete"), relief="flat", cursor="hand2")
                 self.btn_bulk_del.pack(side="right", padx=10)
             elif mode == "export":
-                # --- THE FIX: Swapped packing order so CSV and PDF buttons flip on screen ---
-                tk.Button(self.bulk_actions, text="🖨 Export PDF", font=("Segoe UI", 9, "bold"), bg=self.colors["accent_blue"], fg="#ffffff", command=lambda: self.execute_bulk_action("export_pdf"), relief="flat", cursor="hand2").pack(side="right", padx=(5, 10))
-                tk.Button(self.bulk_actions, text="📄 Export CSV", font=("Segoe UI", 9, "bold"), bg=self.colors["accent_blue"], fg="#ffffff", command=lambda: self.execute_bulk_action("export_csv"), relief="flat", cursor="hand2").pack(side="right", padx=0)
+                # --- THE FIX: Made Summary buttons Yellowish! ---
+                tk.Button(self.bulk_actions, text="🖨 Print Full Bills", font=("Segoe UI", 9, "bold"), bg=self.colors["accent_blue"], fg="#ffffff", command=lambda: self.execute_bulk_action("full_pdf"), relief="flat", cursor="hand2").pack(side="right", padx=(5, 10), ipady=4, ipadx=5)
+                tk.Button(self.bulk_actions, text="📄 Summary PDF", font=("Segoe UI", 9, "bold"), bg="#f59e0b", fg="#ffffff", command=lambda: self.execute_bulk_action("export_pdf"), relief="flat", cursor="hand2").pack(side="right", padx=(5, 0), ipady=4, ipadx=5)
+                tk.Button(self.bulk_actions, text="📥 Summary CSV", font=("Segoe UI", 9, "bold"), bg="#f59e0b", fg="#ffffff", command=lambda: self.execute_bulk_action("export_csv"), relief="flat", cursor="hand2").pack(side="right", padx=0, ipady=4, ipadx=5)
             
             # --- THE FIX: Added the missing Select All button with dynamic counter for Purchases ---
             self.btn_select_all = tk.Button(self.bulk_actions, text="☑ Select All (0)", font=("Segoe UI", 9, "bold"), bg=self.colors["accent_blue"], fg="#ffffff", command=self.toggle_select_all, relief="flat", cursor="hand2")
@@ -1152,6 +1202,14 @@ class PurchasesView(tk.Frame):
             self.export_pdf(bulk_ids=self.selected_bulk_ids)
             self.toggle_bulk_mode()
             return
+        elif action == "full_pdf":
+            # --- THE FIX: Route directly to the Purchase Headless Batch Engine! ---
+            try:
+                from views.purchase_parts.print_studio.purchase_preview_window import bulk_print_full_purchases
+                bulk_print_full_purchases(self, list(self.selected_bulk_ids))
+            except ImportError:
+                messagebox.showerror("Missing Engine", "The Headless Batch Engine for Purchases is not installed yet.", parent=self)
+            return
             
         action_word = "Delete" if action == "delete" else "Restore"
         refund_mode = 'none'
@@ -1247,8 +1305,9 @@ class PurchasesView(tk.Frame):
                     if bulk_ids and child not in bulk_ids: continue
                     
                     row_vals = list(self.tree.item(child, "values"))
-                    # --- THE FIX: Replace the checkbox with a clean sequential number ---
+                    # --- THE FIX: Replace the checkbox with a clean sequential number & strip paperclip icon ---
                     row_vals[0] = export_idx
+                    row_vals[2] = str(row_vals[2]).replace("[ 📎 ] ", "").replace("📎 ", "").strip()
                     writer.writerow(row_vals[:-1]) 
                     export_idx += 1
                     
@@ -1275,8 +1334,9 @@ class PurchasesView(tk.Frame):
             
             has_data = True
             vals = list(self.tree.item(child, "values"))
-            # --- THE FIX: Replace the checkbox with a clean sequential number ---
+            # --- THE FIX: Replace the checkbox with a clean sequential number & strip paperclip icon ---
             vals[0] = export_idx
+            vals[2] = str(vals[2]).replace("[ 📎 ] ", "").replace("📎 ", "").strip()
             
             html += "<tr>"
             for v in vals[:-1]: html += f"<td>{v}</td>"
@@ -1431,12 +1491,22 @@ class PurchasesView(tk.Frame):
             start_year = today.year if today.month >= 4 else today.year - 1
             return f"{start_year}-04-01", f"{start_year+1}-03-31"
         elif opt == "Custom Date Range":
-            try:
-                if not self.from_var.get() or not self.to_var.get(): return None, None
-                start = datetime.strptime(self.from_var.get(), self.date_fmt_code).strftime("%Y-%m-%d")
-                end = datetime.strptime(self.to_var.get(), self.date_fmt_code).strftime("%Y-%m-%d")
-                return start, end
-            except: pass
+            start, end = None, None
+            f_str = self.from_var.get().strip()
+            t_str = self.to_var.get().strip()
+            if f_str:
+                for fmt in (self.date_fmt_code, "%Y-%m-%d", "%d.%m.%Y", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y"):
+                    try:
+                        start = datetime.strptime(f_str[:10], fmt).strftime("%Y-%m-%d")
+                        break
+                    except: pass
+            if t_str:
+                for fmt in (self.date_fmt_code, "%Y-%m-%d", "%d.%m.%Y", "%d-%m-%Y", "%d/%m/%Y", "%m/%d/%Y"):
+                    try:
+                        end = datetime.strptime(t_str[:10], fmt).strftime("%Y-%m-%d")
+                        break
+                    except: pass
+            return start, end
         return None, None
 
     def load_data(self, event=None):
@@ -1485,7 +1555,8 @@ class PurchasesView(tk.Frame):
                     cust_terms[c_name.lower()] = 0
             # ---------------------------------------------------------------------
             
-            query = f"SELECT id, purchase_date, bill_number, vendor_name, subtotal, cgst, sgst, igst, total, status, amount_paid, write_off FROM purchases WHERE company_id = ? AND COALESCE(is_deleted, 0) = 0 AND COALESCE(is_draft, 0) = 0 AND LOWER(COALESCE(status, '')) != 'draft' ORDER BY id {sort_order}"
+            # --- THE FIX: Added 'receipt_path' to the SQL query to detect attachments! ---
+            query = f"SELECT id, purchase_date, bill_number, vendor_name, subtotal, cgst, sgst, igst, total, status, amount_paid, write_off, receipt_path FROM purchases WHERE company_id = ? AND COALESCE(is_deleted, 0) = 0 AND COALESCE(is_draft, 0) = 0 AND LOWER(COALESCE(status, '')) != 'draft' ORDER BY id {sort_order}"
             params = [self.comp_id]
             
             c.execute(query, tuple(params))
@@ -1518,15 +1589,19 @@ class PurchasesView(tk.Frame):
             filtered_rows = []
             
             for r in rows:
-                p_id, p_date, b_num, v_name, sub, cgst, sgst, igst, tot, stat, amt_paid, woff = r
+                p_id, p_date, b_num, v_name, sub, cgst, sgst, igst, tot, stat, amt_paid, woff, rec_path = r
                 woff = woff if woff else 0.0
                 
-                # --- THE FIX: Math-Based Date Filtering ---
-                if start_dt and end_dt:
+                # --- THE FIX: Math-Based Date Filtering (Supports From-Only, To-Only, or Both) ---
+                if start_dt or end_dt:
                     p_dt = safe_p_date(p_date)
-                    if p_dt == datetime.min or p_dt < start_dt or p_dt > end_dt: 
+                    if p_dt == datetime.min:
                         continue
-                # ------------------------------------------
+                    if start_dt and p_dt < start_dt:
+                        continue
+                    if end_dt and p_dt > end_dt:
+                        continue
+                # ---------------------------------------------------------------------------------
                 
                 if search_term:
                     full_txt = f"{p_date} {b_num} {v_name} {tot}".lower()
@@ -1587,8 +1662,13 @@ class PurchasesView(tk.Frame):
             # ---------------------------------------------------
             
             for r in paginated_list:
-                p_id, p_date, b_num, v_name, sub, cgst, sgst, igst, tot, stat, amt_paid, woff = r
+                p_id, p_date, b_num, v_name, sub, cgst, sgst, igst, tot, stat, amt_paid, woff, rec_path = r
                 woff = woff if woff else 0.0
+                
+                # --- THE FIX: Add a paperclip icon if an attachment file physically exists! ---
+                if rec_path and os.path.exists(rec_path):
+                    b_num = f"📎 {b_num}"
+                # ------------------------------------------------------------------------------
                 
                 # --- THE FIX: Display clean vendor name without alias in the main grid ---
                 display_v_name = v_name
@@ -1722,7 +1802,7 @@ class PurchasesView(tk.Frame):
                 conn.close()
                 return
                 
-            b_num, v_name, paid_amt, comp_id, woff, p_date = row
+            b_num, v_name, paid_amt, comp_id, woff, p_date, _ = row
             paid_amt = float(paid_amt or 0.0)
             woff = float(woff or 0.0)
             
@@ -1962,17 +2042,81 @@ class PurchasesView(tk.Frame):
         p_tree.bind("<ButtonRelease-1>", on_tree_click)
 
         def delete_single_payment(pid):
+            conn = database.get_connection()
+            c = conn.cursor()
+            
+            # --- THE FIX: Smart Debit Note Interceptor ---
+            c.execute("SELECT mode, ref, amount, pay_type, party_name, party_id FROM party_payments WHERE id=?", (pid,))
+            pay_info = c.fetchone()
+            if pay_info:
+                p_mode, p_ref, p_amt, p_type, p_party_name, p_party_id = pay_info
+                if p_mode in ("System Reversal", "System Adjustment") and ("Debit Note" in p_ref or "Advance Wallet" in p_ref):
+                    import re
+                    b_num = ""
+                    m = re.search(r'\|\s*(.*?)\s*\(', p_ref)
+                    if m: b_num = m.group(1).strip()
+                    
+                    if b_num:
+                        if not messagebox.askyesno("Reverse Debit Note", f"This will completely reverse the Debit Note/Return for Bill #{b_num}.\n\nContinue?", parent=pop):
+                            conn.close()
+                            return
+                            
+                        c.execute("SELECT id FROM party_payments WHERE company_id=? AND mode IN ('System Reversal', 'System Adjustment') AND (ref LIKE ? OR ref LIKE ?) AND ABS(amount) = ?", 
+                                  (self.comp_id, f"%| {b_num} (%", f"%| {b_num} (%", abs(p_amt)))
+                        twin_ids = [r[0] for r in c.fetchall()]
+                        
+                        try:
+                            if p_party_id:
+                                c.execute("SELECT id, address FROM customers WHERE id=? AND company_id=?", (p_party_id, self.comp_id))
+                            else:
+                                c.execute("SELECT id, address FROM customers WHERE name=? AND company_id=?", (p_party_name, self.comp_id))
+                                
+                            c_row = c.fetchone()
+                            if c_row:
+                                c_id, raw_addr = c_row[0], c_row[1]
+                                try: j_data = json.loads(raw_addr)
+                                except: j_data = {}
+                                pocket = "advance_out" if p_type == 'make' else "advance_in"
+                                curr_adv = float(j_data.get(pocket, j_data.get("advance_wallet", 0.0)))
+                                j_data[pocket] = curr_adv + abs(p_amt)
+                                c.execute("UPDATE customers SET address=? WHERE id=?", (json.dumps(j_data), c_id))
+                                conn.commit()
+                        except: pass
+                        conn.close()
+                        
+                        for t_id in twin_ids:
+                            try: database.delete_party_payment(t_id, self.comp_id, bypass_rules=True)
+                            except: pass
+                            
+                        load_payments()
+                        if hasattr(self, 'load_data'): self.load_data()
+                        return
+            # ---------------------------------------------
+
+            # --- THE FIX: The Missing GST Vault Door Check for Purchase Payments! ---
+            c.execute("SELECT ref FROM party_payments WHERE id=?", (pid,))
+            ref_row = c.fetchone()
+            if ref_row and ref_row[0]:
+                for part in ref_row[0].split(" | "):
+                    b_num = part.split(" (")[0].strip()
+                    c.execute("SELECT ca_submitted FROM purchases WHERE bill_number=? AND company_id=?", (b_num, self.comp_id))
+                    purch_row = c.fetchone()
+                    if purch_row and purch_row[0] == 1:
+                        messagebox.showwarning("Locked", f"Payment deletion blocked.\n\nThis payment is linked to Purchase Bill {b_num}, which is already GST Filed.", parent=pop)
+                        conn.close()
+                        return
+            # ------------------------------------------------------------------------
+
             # --- THE FIX: Clean UI pre-check for Past Payment Deletions ---
             curr_role = getattr(self.app, "current_role", "Admin")
             curr_uid = getattr(self.app, "current_user_id", None) or getattr(database, "ACTIVE_USER_ID", 1)
             
             if curr_role != "Admin" and str(curr_uid) != "1":
-                conn = database.get_connection()
-                c = conn.cursor()
                 c.execute("SELECT pay_date FROM party_payments WHERE id=?", (pid,))
                 row = c.fetchone()
                 conn.close()
                 
+                # --- THE FIX: Correctly indented so it only runs for Non-Admins! ---
                 if row:
                     p_date = str(row[0]).strip()
                     today_date = date.today()
@@ -1991,6 +2135,8 @@ class PurchasesView(tk.Frame):
                         if p_rules.get("lock_past_payments", False) or i_rules.get("lock_past_payments", False) or pt_rules.get("lock_past_payments", False):
                             messagebox.showerror("Access Denied", f"This payment is from a previous date ({p_date}).\n\nDeleting past days' payment entries is locked for your account.\n\nPlease contact the Admin.", parent=pop)
                             return
+            else:
+                conn.close()
             # --------------------------------------------------------------
 
             if not messagebox.askyesno("Confirm Delete", "Permanently delete this payment record?\n\nThis will reverse the amount from the bill balance and/or Advance Wallet.", parent=pop):

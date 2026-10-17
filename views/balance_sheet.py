@@ -251,7 +251,7 @@ class BalanceSheetView(tk.Frame):
                     continue
                 
                 if name not in inventory:
-                    inventory[name] = {'net': 0, 'latest_price': price, 'dep_rate': 0.0, 'first_date': None}
+                    inventory[name] = {'net': 0, 'adds': [], 'dep_rate': 0.0, 'latest_price': price}
                 
                 try: j = json.loads(notes_raw)
                 except: j = {}
@@ -261,34 +261,46 @@ class BalanceSheetView(tk.Frame):
                     
                 if t_type == 'ADD':
                     inventory[name]['latest_price'] = price
-                    if d_obj:
-                        if not inventory[name]['first_date'] or d_obj < inventory[name]['first_date']:
-                            inventory[name]['first_date'] = d_obj
-                
-                if t_type == 'ADD':
                     inventory[name]['net'] += qty
+                    inventory[name]['adds'].append({'qty': qty, 'price': price, 'date': d_obj})
                 elif t_type in ('LOSS', 'SOLD'):
                     inventory[name]['net'] -= qty
+                    rem = qty
+                    for a in inventory[name]['adds']:
+                        if a['qty'] > 0:
+                            if a['qty'] >= rem:
+                                a['qty'] -= rem; rem = 0; break
+                            else:
+                                rem -= a['qty']; a['qty'] = 0
 
             for name, data in inventory.items():
                 if data['net'] > 0:
-                    gross_val = data['net'] * data['latest_price']
-                    dep_amount = 0.0
+                    total_gross_val = 0.0
+                    total_dep_amount = 0.0
+                    first_available_date = None
                     
-                    if data['dep_rate'] > 0 and data['first_date'] and end_date:
-                        days_owned = (end_date - data['first_date']).days
-                        if days_owned > 0:
-                            dep_factor = (data['dep_rate'] / 100.0) * (days_owned / 365.25)
-                            if dep_factor > 1.0: dep_factor = 1.0 
-                            dep_amount = gross_val * dep_factor
+                    for batch in data['adds']:
+                        if batch['qty'] > 0:
+                            batch_gross = batch['qty'] * batch['price']
+                            total_gross_val += batch_gross
+                            
+                            if not first_available_date and batch['date']:
+                                first_available_date = batch['date']
+                            
+                            if data['dep_rate'] > 0 and batch['date'] and end_date:
+                                days_owned = (end_date - batch['date']).days
+                                if days_owned > 0:
+                                    dep_factor = (data['dep_rate'] / 100.0) * (days_owned / 365.25)
+                                    if dep_factor > 1.0: dep_factor = 1.0 
+                                    total_dep_amount += (batch_gross * dep_factor)
                     
-                    net_val = gross_val - dep_amount
+                    net_val = total_gross_val - total_dep_amount
                     self.closing_stock += net_val
                     
-                    disp_date = data["first_date"].strftime(self.date_fmt_code) if data["first_date"] else "Unknown"
-                    if dep_amount > 0:
-                        self.total_depreciation += dep_amount
-                        self.detail_stock.append((disp_date, f"⚙️ {name} (Depreciated)", format_currency(net_val, self.curr_fmt), f"Gross: {format_currency(gross_val, self.curr_fmt)} | Loss: -{format_currency(dep_amount, self.curr_fmt)}"))
+                    disp_date = first_available_date.strftime(self.date_fmt_code) if first_available_date else "Unknown"
+                    if total_dep_amount > 0:
+                        self.total_depreciation += total_dep_amount
+                        self.detail_stock.append((disp_date, f"⚙️ {name} (Depreciated)", format_currency(net_val, self.curr_fmt), f"Gross: {format_currency(total_gross_val, self.curr_fmt)} | Loss: -{format_currency(total_dep_amount, self.curr_fmt)}"))
                     else:
                         self.detail_stock.append((disp_date, name, format_currency(net_val, self.curr_fmt), f"{data['net']} units @ {format_currency(data['latest_price'], self.curr_fmt)}"))
             conn_d.close()

@@ -99,9 +99,14 @@ class InvoicesView(tk.Frame):
                     self.focus_set()
             except: pass
             
-            # 3. Handle the filter resets
+            # 3. Handle the filter resets and clear highlights
             try:
                 if e.widget in (self, getattr(self, 'top_header', None), getattr(self, 'tiles_f', None), getattr(self, 'toolbar', None), getattr(self, 'table_frame', None), getattr(self, 'bulk_toolbar', None), getattr(self, 'pagination_frame', None)):
+                    # --- THE FIX: Strip the blue highlight when clicking main page empty space! ---
+                    if hasattr(self, 'tree') and self.tree.selection():
+                        self.tree.selection_remove(self.tree.selection())
+                    # -----------------------------------------------------------------------------
+                    
                     if self.active_filter != "All":
                         self.set_tile_filter("All", "TOTAL INVOICES")
             except: pass
@@ -114,6 +119,11 @@ class InvoicesView(tk.Frame):
         self.top_header.bind("<Button-1>", on_bg_click)
         
         tk.Label(self.top_header, text="Invoices & Billing", font=("Arial", 20, "bold"), bg=self.BG, fg=self.FG).pack(side="left")
+        try:
+            from views.audit_ui import attach_audit_button
+            attach_audit_button(self.top_header, default_tab="Invoices")
+        except Exception:
+            pass
         
         add_btn = tk.Button(self.top_header, text="⊕ New Invoice", font=("Arial", 11, "bold"), bg=self.BLUE, fg="#ffffff", relief="flat", cursor="hand2", padx=15, pady=6, command=lambda: open_new_invoice(self))
         add_btn.pack(side="right")
@@ -255,15 +265,15 @@ class InvoicesView(tk.Frame):
         except:
             w_dict = {}
 
-        self.tree.column("sl_no", width=w_dict.get("sl_no", 60), minwidth=60, anchor="center", stretch=False)
-        self.tree.column("date", width=w_dict.get("date", 90), minwidth=90, anchor="w", stretch=False)
-        self.tree.column("inv_num", width=w_dict.get("inv_num", 130), minwidth=130, anchor="w", stretch=False)
-        self.tree.column("customer", width=w_dict.get("customer", 180), minwidth=130, anchor="w", stretch=False)
-        self.tree.column("subtotal", width=w_dict.get("subtotal", 90), minwidth=90, anchor="e", stretch=False)
-        self.tree.column("gst", width=w_dict.get("gst", 80), minwidth=80, anchor="e", stretch=False)
-        self.tree.column("total", width=w_dict.get("total", 100), minwidth=100, anchor="e", stretch=False)
-        self.tree.column("tds", width=w_dict.get("tds", 80), minwidth=80, anchor="e", stretch=False)
-        self.tree.column("status", width=w_dict.get("status", 100), minwidth=100, anchor="center", stretch=False)
+        self.tree.column("sl_no", width=w_dict.get("sl_no", 60), minwidth=60, anchor="center", stretch=True)
+        self.tree.column("date", width=w_dict.get("date", 90), minwidth=90, anchor="w", stretch=True)
+        self.tree.column("inv_num", width=w_dict.get("inv_num", 130), minwidth=130, anchor="w", stretch=True)
+        self.tree.column("customer", width=w_dict.get("customer", 180), minwidth=130, anchor="w", stretch=True)
+        self.tree.column("subtotal", width=w_dict.get("subtotal", 90), minwidth=90, anchor="e", stretch=True)
+        self.tree.column("gst", width=w_dict.get("gst", 80), minwidth=80, anchor="e", stretch=True)
+        self.tree.column("total", width=w_dict.get("total", 100), minwidth=100, anchor="e", stretch=True)
+        self.tree.column("tds", width=w_dict.get("tds", 80), minwidth=80, anchor="e", stretch=True)
+        self.tree.column("status", width=w_dict.get("status", 100), minwidth=100, anchor="center", stretch=True)
         self.tree.column("ghost", width=10, minwidth=10, stretch=True)
 
         if not self.has_gst:
@@ -675,18 +685,8 @@ class InvoicesView(tk.Frame):
                 
             try:
                 for pid in valid_ids:
-                    conn_a = database.get_connection()
-                    cur_a = conn_a.cursor()
-                    cur_a.execute("SELECT party_name, ref, amount, mode FROM party_payments WHERE id=?", (pid,))
-                    p_row = cur_a.fetchone()
-                    conn_a.close()
+                    # database.delete_party_payment automatically logs the deletion to Audit Logs
                     database.delete_party_payment(pid, self.comp_id)
-                    if p_row:
-                        database.log_audit(
-                            "Invoices", "Payment Deleted", p_row[1] or "Payment",
-                            f"Reversed & deleted payment ({p_row[3]}) for {p_row[0]}",
-                            abs(float(p_row[2] or 0.0)), company_id=self.comp_id
-                        )
                     
                 load_payments()
                 if hasattr(self, 'load_data'): self.load_data()
@@ -1094,18 +1094,14 @@ class InvoicesView(tk.Frame):
             open_payment_portal(self, customer_name, cust_id)
             # ------------------------------------------------------------------
         else: # Anywhere else on the row
-            try:
-                conn = database.get_connection()
-                c = conn.cursor()
-                # --- THE FIX: Only fetch the GST lock status. We no longer care about payments! ---
-                c.execute("SELECT ca_submitted FROM invoices WHERE id=? AND company_id=?", (row_id, self.comp_id))
-                r = c.fetchone()
-                conn.close()
-                if r and r[0] == 1:
-                    messagebox.showwarning("GST Filed", "This invoice is marked as 'GST Filed'.\n\nTo prevent data mismatch, editing is locked.", parent=self)
-                    return
-                # --------------------------------------------------------------------------------------
-            except: pass
+            allowed, reason = database.check_invoice_permission(row_id, action="edit", company_id=self.comp_id)
+            if not allowed:
+                messagebox.showwarning("Access Restricted", reason, parent=self)
+                return
+            
+            # --- THE FIX: Tell the app to remember this invoice number before opening the edit window! ---
+            self.app.pending_highlight = str(self.tree.item(row_id, "values")[2]).strip()
+            # ---------------------------------------------------------------------------------------------
             open_new_invoice(self, row_id)
 
     def create_stat_card(self, parent, title, value_var, value_color, click_callback=None):
@@ -1171,9 +1167,10 @@ class InvoicesView(tk.Frame):
                 self.btn_bulk_del = tk.Button(self.bulk_toolbar, text="🗑 Delete Selected (0)", font=("Arial", 9, "bold"), bg=self.RED, fg="#ffffff", command=self.confirm_bulk_delete, relief="flat", cursor="hand2")
                 self.btn_bulk_del.pack(side="right", padx=10, ipady=4, ipadx=5)
             elif mode == "export":
-                # --- THE FIX: Swapped packing order so PDF appears first ---
-                tk.Button(self.bulk_toolbar, text="🖨 Export PDF", font=("Arial", 9, "bold"), bg=self.BLUE, fg="#ffffff", command=lambda: self.execute_bulk_export("pdf"), relief="flat", cursor="hand2").pack(side="right", padx=(5, 10), ipady=4, ipadx=5)
-                tk.Button(self.bulk_toolbar, text="📄 Export CSV", font=("Arial", 9, "bold"), bg=self.BLUE, fg="#ffffff", command=lambda: self.execute_bulk_export("csv"), relief="flat", cursor="hand2").pack(side="right", padx=0, ipady=4, ipadx=5)
+                # --- THE FIX: Made Summary buttons Yellowish! ---
+                tk.Button(self.bulk_toolbar, text="🖨 Print Full Invoices", font=("Arial", 9, "bold"), bg=self.BLUE, fg="#ffffff", command=lambda: self.execute_bulk_export("full_pdf"), relief="flat", cursor="hand2").pack(side="right", padx=(5, 10), ipady=4, ipadx=5)
+                tk.Button(self.bulk_toolbar, text="📄 Summary PDF", font=("Arial", 9, "bold"), bg=self.YELLOW, fg="#ffffff", command=lambda: self.execute_bulk_export("pdf"), relief="flat", cursor="hand2").pack(side="right", padx=(5, 0), ipady=4, ipadx=5)
+                tk.Button(self.bulk_toolbar, text="📥 Summary CSV", font=("Arial", 9, "bold"), bg=self.YELLOW, fg="#ffffff", command=lambda: self.execute_bulk_export("csv"), relief="flat", cursor="hand2").pack(side="right", padx=0, ipady=4, ipadx=5)
             
             # --- THE FIX: Bound the Select All button to a variable and added the (0) counter ---
             self.btn_select_all = tk.Button(self.bulk_toolbar, text="☑ Select All (0)", font=("Arial", 9, "bold"), bg=self.BLUE, fg="#ffffff", cursor="hand2", relief="flat", command=self.select_all_bulk)
@@ -1214,14 +1211,14 @@ class InvoicesView(tk.Frame):
         if hasattr(self, "btn_select_all") and self.btn_select_all.winfo_exists():
             self.btn_select_all.config(text=f"☑ Select All ({len(self.bulk_selection)})")
         
-        all_items = [child for child in self.tree.get_children() if "empty" not in self.tree.item(child, "tags")]
+        all_items = [child for child in self.tree.get_children() if "empty" not in self.tree.item(child, "tags") and "dummy" not in self.tree.item(child, "tags")]
         if len(self.bulk_selection) == len(all_items) and len(all_items) > 0:
             self.tree.heading("sl_no", text="[✓] ALL")
         else:
             self.tree.heading("sl_no", text="[ ] ALL")
 
     def select_all_bulk(self):
-        visible_ids = [iid for iid in self.tree.get_children() if 'dummy' not in self.tree.item(iid, "tags")]
+        visible_ids = [iid for iid in self.tree.get_children() if 'dummy' not in self.tree.item(iid, "tags") and 'empty' not in self.tree.item(iid, "tags")]
         if not visible_ids: return
         
         # --- THE FIX: Only filter out locked items if we are DELETING ---
@@ -1457,7 +1454,7 @@ class InvoicesView(tk.Frame):
         selected_rows = c.fetchall()
         
         # --- THE FIX: Fetch TDS logic for bulk export ---
-        c.execute("SELECT ref, amount FROM party_payments WHERE company_id=? AND mode='TDS Deduction'", (self.comp_id,))
+        c.execute("SELECT ref, amount FROM party_payments WHERE company_id=? AND pay_type='receive' AND mode='TDS Deduction'", (self.comp_id,))
         tds_map = {}
         for ref_str, amt in c.fetchall():
             if ref_str:
@@ -1512,8 +1509,14 @@ class InvoicesView(tk.Frame):
             
         # Trigger the normal export functions (They will process the newly loaded tree!)
         try:
-            if fmt == "pdf": export_to_pdf(self)
-            elif fmt == "csv": export_to_csv(self)
+            if fmt == "pdf": 
+                export_to_pdf(self)
+            elif fmt == "csv": 
+                export_to_csv(self)
+            elif fmt == "full_pdf":
+                # --- THE FIX: Route directly to the Headless Batch Engine! ---
+                from views.invoice_parts.invoice_actions import bulk_print_full_invoices
+                bulk_print_full_invoices(self, list(self.bulk_selection))
         except Exception as e:
             messagebox.showerror("Export Error", str(e), parent=self)
             
@@ -1551,7 +1554,7 @@ class InvoicesView(tk.Frame):
         deleted_invs = c.fetchall()
         
         # --- THE FIX: Load TDS history across all active invoices ---
-        c.execute("SELECT ref, amount FROM party_payments WHERE company_id=? AND mode='TDS Deduction'", (self.comp_id,))
+        c.execute("SELECT ref, amount FROM party_payments WHERE company_id=? AND pay_type='receive' AND mode='TDS Deduction'", (self.comp_id,))
         self.tds_map = {}
         for ref_str, amt in c.fetchall():
             if ref_str:
@@ -1818,22 +1821,17 @@ class InvoicesView(tk.Frame):
                 # Note: Added an extra "" to match the 10 columns!
                 self.tree.insert("", "end", iid=f"dummy_{idx}", values=("", "", "", "", "", "", "", "", "", ""), tags=(stripe_tag, 'dummy'))
         
+        # --- THE FIX: Instant, permanent blue highlight (No delayed pop-ins) ---
         if hasattr(self.app, 'pending_highlight') and self.app.pending_highlight:
             target_ref = str(self.app.pending_highlight)
             for child in self.tree.get_children():
                 if str(self.tree.item(child)['values'][2]) == target_ref:
                     self.tree.see(child)
-                    current_tags = list(self.tree.item(child, 'tags'))
-                    self.tree.item(child, tags=tuple(current_tags + ['highlight_target']))
+                    self.tree.selection_set(child)
+                    self.tree.focus(child)
                     self.app.pending_highlight = None 
-                    def clear_highlight_and_select(item_id=child, orig_tags=current_tags):
-                        try:
-                            if self.tree.exists(item_id):
-                                self.tree.item(item_id, tags=tuple(orig_tags))
-                                self.tree.selection_set(item_id); self.tree.focus(item_id)
-                        except: pass
-                    self.after(2500, clear_highlight_and_select)
                     break
+        # -----------------------------------------------------------------------
 
         self.update_memory_buttons()
 
@@ -1844,6 +1842,11 @@ class InvoicesView(tk.Frame):
         row_id = self.tree.identify_row(event.y)
         
         if region == "heading" or not row_id or 'dummy' in self.tree.item(row_id, 'tags'): 
+            # --- THE FIX: Strip the blue highlight when clicking an empty table row! ---
+            if self.tree.selection():
+                self.tree.selection_remove(self.tree.selection())
+            # ---------------------------------------------------------------------------
+                
             if self.active_filter != "All": 
                 self.set_tile_filter("All", "TOTAL INVOICES")
             return
@@ -1854,43 +1857,79 @@ class InvoicesView(tk.Frame):
         if self.bulk_mode: return
         row_id = self.tree.identify_row(event.y)
         if row_id and 'dummy' not in self.tree.item(row_id, 'tags'):
-            self.tree.selection_set(row_id)
+            # --- THE FIX: Preserve native multi-selection on right click! ---
+            if row_id not in self.tree.selection():
+                self.tree.selection_set(row_id)
+            # ----------------------------------------------------------------
+            
             menu = tk.Menu(self, tearoff=0, font=("Arial", 10), bg=self.CARD, fg=self.FG, activebackground=self.BLUE, activeforeground="#ffffff")
             
-            try:
-                conn = database.get_connection()
-                c = conn.cursor()
-                # --- THE FIX: Only check if it's GST Locked ---
-                c.execute("SELECT ca_submitted FROM invoices WHERE id=? AND company_id=?", (row_id, self.comp_id))
-                r = c.fetchone()
-                conn.close()
-                is_locked = (r and r[0] == 1)
-            except: 
-                is_locked = False
+            # --- THE FIX: Count actual natively selected items ---
+            selected_items = [iid for iid in self.tree.selection() if 'dummy' not in self.tree.item(iid, 'tags')]
+            sel_count = len(selected_items)
+            # -----------------------------------------------------
 
-            if is_locked:
-                menu.add_command(label="🔒 Cannot Edit (GST Filed)", foreground="#ef4444", command=lambda: messagebox.showwarning("GST Filed", "This invoice is marked as 'GST Filed' and cannot be edited.", parent=self))
-            else:
-                menu.add_command(label="✏️ Edit Invoice", command=lambda: open_new_invoice(self, edit_inv_id=row_id))
+            if sel_count <= 1:
+                allowed_to_edit, _ = database.check_invoice_permission(row_id, action="edit", company_id=self.comp_id)
+                is_locked = not allowed_to_edit
+
+                if is_locked:
+                    menu.add_command(label="🔒 Cannot Edit (GST Filed)", foreground="#ef4444", command=lambda: messagebox.showwarning("GST Filed", "This invoice is marked as 'GST Filed' and cannot be edited.", parent=self))
+                else:
+                    def trigger_edit(r_id=row_id):
+                        self.app.pending_highlight = str(self.tree.item(r_id, "values")[2]).strip()
+                        open_new_invoice(self, edit_inv_id=r_id)
+                        
+                    menu.add_command(label="✏️ Edit Invoice", command=trigger_edit)
+                    
+                menu.add_command(label="⎘ Duplicate / Clone", command=lambda: open_new_invoice(self, clone_id=row_id))
+                menu.add_command(label="👁 Generate Preview", command=lambda: show_preview_from_db(self, row_id))
+                menu.add_separator()
                 
-            # --- THE FIX: Added Duplicate/Clone Button ---
-            menu.add_command(label="⎘ Duplicate / Clone", command=lambda: open_new_invoice(self, clone_id=row_id))
-            # ---------------------------------------------
-            
-            menu.add_command(label="👁 Generate Preview", command=lambda: show_preview_from_db(self, row_id))
-            menu.add_separator()
-            
-            if is_locked:
-                menu.add_command(label="🔒 Cannot Delete (GST Filed)", foreground="#ef4444", command=lambda: messagebox.showwarning("GST Filed", "This invoice is marked as 'GST Filed' and cannot be deleted.", parent=self))
-            else:
-                menu.add_command(label="❌ Move to Recycle Bin", command=lambda: self.attempt_soft_delete(row_id))
+                if is_locked:
+                    menu.add_command(label="🔒 Cannot Delete (GST Filed)", foreground="#ef4444", command=lambda: messagebox.showwarning("GST Filed", "This invoice is marked as 'GST Filed' and cannot be deleted.", parent=self))
+                else:
+                    menu.add_command(label="❌ Move to Recycle Bin", command=lambda: self.attempt_soft_delete(row_id))
+                    
+                menu.add_separator()
+                # --- THE FIX: Updated to Bulk Print / Export Mode ---
+                menu.add_command(label="🖨 Bulk Print / Export Mode", command=lambda: self.toggle_bulk_mode("export"))
                 
-            menu.add_separator()
-            menu.add_command(label="📄 Bulk Export", command=lambda: self.toggle_bulk_mode("export"))
-            if is_locked:
-                menu.add_command(label="🔒 Cannot Bulk Delete (GST Filed)", foreground="#ef4444", command=lambda: messagebox.showwarning("GST Filed", "This invoice is marked as 'GST Filed'. Bulk deletion involves locked documents.", parent=self.winfo_toplevel()))
+                if is_locked:
+                    menu.add_command(label="🔒 Cannot Bulk Delete (GST Filed)", foreground="#ef4444", command=lambda: messagebox.showwarning("GST Filed", "This invoice is marked as 'GST Filed'. Bulk deletion involves locked documents.", parent=self.winfo_toplevel()))
+                else:
+                    menu.add_command(label="🗑 Bulk Delete Mode", command=lambda: self.toggle_bulk_mode("delete"))
             else:
-                menu.add_command(label="🗑 Bulk Delete", command=lambda: self.toggle_bulk_mode("delete"))
+                # --- THE FIX: The New Native Multi-Select Menu! ---
+                def quick_csv():
+                    self.bulk_selection = set(str(iid) for iid in selected_items)
+                    self.bulk_mode = True 
+                    self.execute_bulk_export("csv")
+                    
+                def quick_delete():
+                    self.bulk_selection = set(str(iid) for iid in selected_items)
+                    self.bulk_mode = True 
+                    self.bulk_action_type = "delete"
+                    self.confirm_bulk_delete()
+
+                def enter_visual_bulk(mode):
+                    self.toggle_bulk_mode(mode)
+                    self.bulk_selection = set(str(iid) for iid in selected_items)
+                    self.load_data()
+                    if hasattr(self, "btn_bulk_del") and self.btn_bulk_del.winfo_exists(): 
+                        self.btn_bulk_del.config(text=f"🗑 Delete Selected ({len(self.bulk_selection)})")
+                    if hasattr(self, "btn_select_all") and self.btn_select_all.winfo_exists():
+                        self.btn_select_all.config(text=f"☑ Select All ({len(self.bulk_selection)})")
+                
+                from views.invoice_parts.invoice_actions import bulk_print_full_invoices
+                menu.add_command(label=f"🖨 Instant Print {sel_count} Full Invoices", command=lambda: bulk_print_full_invoices(self, selected_items))
+                menu.add_command(label=f"📄 Instant Export {sel_count} to CSV", command=quick_csv)
+                menu.add_command(label=f"🗑 Instant Delete {sel_count} Invoices", foreground=self.RED, command=quick_delete)
+                
+                menu.add_separator()
+                menu.add_command(label="🖨 Review in Bulk Print/Export Mode", command=lambda: enter_visual_bulk("export"))
+                menu.add_command(label="🗑 Review in Bulk Delete Mode", command=lambda: enter_visual_bulk("delete"))
+                # --------------------------------------------------
             
             menu.tk_popup(event.x_root, event.y_root)
 

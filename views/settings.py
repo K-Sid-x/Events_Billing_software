@@ -70,6 +70,7 @@ class SettingsView(tk.Frame):
         self._is_restoring = False
         
         self.bind("<Enter>", self._bind_mousewheel)
+        self.bind("<Destroy>", self._restore_app_mousewheel, add="+")
         self._bind_mousewheel()
         self.after(300, self.focus_set)
         
@@ -79,15 +80,35 @@ class SettingsView(tk.Frame):
             self.app.unbind_class("Scale", "<MouseWheel>")
             self.app.unbind_class("Scale", "<Button-4>")
             self.app.unbind_class("Scale", "<Button-5>")
-            self.app.unbind_class("TCombobox", "<MouseWheel>")
-            self.app.unbind_class("TCombobox", "<Button-4>")
-            self.app.unbind_class("TCombobox", "<Button-5>")
         except: pass
+
+    def _restore_app_mousewheel(self, event=None):
+        if event is None or event.widget == self:
+            try:
+                if hasattr(self, "app") and hasattr(self.app, "_on_mousewheel"):
+                    self.app.bind_all("<MouseWheel>", self.app._on_mousewheel)
+            except: pass
+
+    def _copy_asset_to_vault(self, src_path, prefix="asset"):
+        if not src_path or not os.path.exists(src_path):
+            return src_path
+        try:
+            import shutil, time
+            logo_dir = os.path.join(parent_dir, "company_logos")
+            os.makedirs(logo_dir, exist_ok=True)
+            if os.path.abspath(os.path.dirname(src_path)) == os.path.abspath(logo_dir):
+                return src_path
+            ext = os.path.splitext(src_path)[1] or ".png"
+            dst_path = os.path.normpath(os.path.join(logo_dir, f"{prefix}_cid_{self.comp_id}_{int(time.time()*1000)}{ext}"))
+            shutil.copy2(src_path, dst_path)
+            return dst_path
+        except Exception:
+            return src_path
 
     def browse_sig(self):
         path = filedialog.askopenfilename(filetypes=[("Image Files", "*.png;*.jpg;*.jpeg")])
         if path:
-            self.sig_path_var.set(path)
+            self.sig_path_var.set(self._copy_asset_to_vault(path, "sig"))
 
     def save_sig(self):
         role = self.sig_role_var.get().strip()
@@ -136,8 +157,9 @@ class SettingsView(tk.Frame):
     def browse_bank_qr(self):
         path = filedialog.askopenfilename(filetypes=[("Image Files", "*.png;*.jpg;*.jpeg")])
         if path:
-            self.bank_qr_var.set(path)
-            self.update_qr_preview(path)
+            safe_p = self._copy_asset_to_vault(path, "qr")
+            self.bank_qr_var.set(safe_p)
+            self.update_qr_preview(safe_p)
 
     def update_qr_preview(self, path=""):
         if not hasattr(self, 'qr_preview_cvs'): return
@@ -675,8 +697,13 @@ class SettingsView(tk.Frame):
         style.map("Horizontal.TScrollbar", background=[("active", self.theme["ACCENT_BLUE"])])
 
         header = tk.Frame(self, bg=self.theme["CARD_BG"], pady=10, padx=20, highlightbackground=self.theme["BORDER_COLOR"], highlightthickness=1)
-        header.pack(fill="x", pady=(0, 10))
+        header.pack(fill="x", pady=(10, 10), padx=10)
         tk.Label(header, text="⚙️ Master Settings", font=("Arial", 16, "bold"), bg=self.theme["CARD_BG"], fg=self.theme["TEXT_PRIMARY"]).pack(side="left")
+        try:
+            from views.audit_ui import attach_audit_button
+            attach_audit_button(header, default_tab="Settings")
+        except Exception:
+            pass
 
         btn_import = tk.Button(header, text="⭱ Import", font=("Arial", 10, "bold"), bg=self.theme["CARD_BG"], fg=self.theme["TEXT_SECONDARY"], relief="flat", cursor="hand2", command=self.import_backup)
         btn_import.pack(side="right", padx=(5, 0))
@@ -839,7 +866,7 @@ class SettingsView(tk.Frame):
             bbox = self.cvs.bbox(self.drag_item)
             if bbox:
                 if self.drag_item == "drag_logo":
-                    self.cached_pos["logo_x"] = bbox[0]; self.cached_pos["logo_y"] = bbox[1]
+                    self.cached_pos["drag_logo_x"] = bbox[0]; self.cached_pos["drag_logo_y"] = bbox[1]
                 else: 
                     self.cached_pos[self.drag_item + "_x"] = (bbox[0] + bbox[2]) / 2 
                     self.cached_pos[self.drag_item + "_y"] = bbox[1]
@@ -1098,14 +1125,35 @@ class SettingsView(tk.Frame):
             try: clean_fonts[k] = int(float(v.get() or 10))
             except: clean_fonts[k] = 10
 
-        data = {
+        # Preserve existing keys in template_json (e.g. invoice_format, custom_inv_format, business_type, fy_start)
+        existing_data = {}
+        try:
+            comp_curr = database.get_company(self.comp_id)
+            if comp_curr and len(comp_curr) > 14 and comp_curr[14]:
+                existing_data = json.loads(comp_curr[14])
+                if not isinstance(existing_data, dict):
+                    existing_data = {}
+        except Exception:
+            existing_data = {}
+
+        new_to_canonical_curr = {
+            "Indian Rupees (₹ 10,00,000.00)": "Indian Rupees (₹)",
+            "US Dollar ($ 1,000,000.00)": "US Dollar ($)",
+            "Euro (€ 1.000.000,00)": "Euro (€)",
+            "British Pound (£ 1,000,000.00)": "British Pound (£)",
+            "Generic Number (1,000,000.00)": "Generic Number"
+        }
+        raw_curr = self.currency_var.get()
+        clean_curr = new_to_canonical_curr.get(raw_curr, raw_curr)
+
+        existing_data.update({
             "page_size": self.paper_size_var.get(), "swap_title_order": self.swap_title_order_var.get(), 
             "header_spacing": self.header_spacing_var.get(), "lbl_billed_to": self.lbl_billed_to_var.get(),
             "swap_boxes": self.swap_boxes_var.get(), 
             "terms_list": [t.get() for t in self.terms_vars], 
             "term1": self.terms_vars[0].get() if len(self.terms_vars) > 0 else "", 
             "term2": self.terms_vars[1].get() if len(self.terms_vars) > 1 else "",
-            "date_format": self.date_format_var.get(), "currency_format": self.currency_var.get(),
+            "date_format": self.date_format_var.get(), "currency_format": clean_curr,
             "banks": self.banks_list, "fonts": clean_fonts,
             "colors": {k: v.get() for k, v in self.colors.items()},
             "bolds": {k: v.get() for k, v in self.bolds.items()},
@@ -1117,7 +1165,7 @@ class SettingsView(tk.Frame):
             "show_esign": self.show_esign_var.get(),
             "sig_scale": self.sig_scale_var.get(),
             "sig_nudge": self.sig_nudge_var.get()
-        }
+        })
 
         gst_status = 1 if getattr(self, 'has_gst', True) else 0
 
@@ -1126,9 +1174,11 @@ class SettingsView(tk.Frame):
                 self.comp_id, self.name_var.get(), self.sec_var.get(), self.addr_var.get(), 
                 self.p1_var.get(), self.p2_var.get(), self.p3_var.get(), self.email_var.get(), 
                 gst_status, self.gst_var.get(), self.logo_path_var.get(), self.layout_var.get(), 
-                l_size, self.logo_shape_var.get(), json.dumps(data), self.comp_pin
+                l_size, self.logo_shape_var.get(), json.dumps(existing_data), self.comp_pin
             )
-            if success_msg: messagebox.showinfo("Success", success_msg)
+            if success_msg:
+                database.log_audit("Settings", "Updated", self.name_var.get() or "Company Settings", success_msg, 0.0, company_id=self.comp_id)
+                messagebox.showinfo("Success", success_msg)
             return True
         except Exception as e:
             if success_msg: messagebox.showerror("Error", f"Could not save settings:\n{e}")

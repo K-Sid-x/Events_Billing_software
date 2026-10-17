@@ -61,7 +61,14 @@ def attach_audit_button(header_frame, default_tab="All Tabs"):
     def _update_header_badge():
         if not btn_wrap.winfo_exists():
             return False
-        cid = getattr(app, "active_company_id", None) or getattr(database, "ACTIVE_COMPANY_ID", 1)
+        cid = getattr(app, "active_company_id", None)
+        
+        # --- THE FIX: Silence Ghost Audit Badges on the Global Home Screen ---
+        if not cid:
+            if lbl_badge.winfo_ismapped(): lbl_badge.pack_forget()
+            return True
+        # ---------------------------------------------------------------------
+        
         counts = database.get_unseen_audit_counts(cid)
         total_unseen = counts.get("All Tabs", 0)
         if total_unseen > 0:

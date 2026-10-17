@@ -404,10 +404,10 @@ class ProfitLossView(tk.Frame):
                 if status == "Paid": amt_to_record = subtotal
                 else:
                     total_inv = self.safe_float(i[6])
-                    bal_due = self.safe_float(i[8]) if len(i)>8 else total_inv
+                    amount_paid = self.safe_float(i[9]) if len(i)>9 else 0.0
                     if total_inv > 0:
-                        collected = total_inv - bal_due
-                        paid_ratio = collected / total_inv
+                        # --- THE FIX: Capped the ratio at 100% so write-offs don't inflate cash flow! ---
+                        paid_ratio = min(1.0, amount_paid / total_inv)
                         amt_to_record = subtotal * paid_ratio
             else:
                 amt_to_record = subtotal
@@ -444,7 +444,8 @@ class ProfitLossView(tk.Frame):
                 
                 amt_to_record = paid if is_cash_basis else subtotal
                 if is_cash_basis and total > 0:
-                    paid_ratio = paid / total
+                    # --- THE FIX: Capped the ratio at 100% for purchases too! ---
+                    paid_ratio = min(1.0, paid / total)
                     amt_to_record = subtotal * paid_ratio
                     
                 if amt_to_record > 0:
