@@ -190,16 +190,16 @@ class InvoicePaymentPortal:
 
         # --- THE FIX: Ghost column trick for locked Main Portal headers ---
         cols = [
-            ("date", "DATE", w_dict.get("date", 90), "center", False), 
-            ("inv_num", "INVOICE NO.", w_dict.get("inv_num", 110), "w", False), 
-            ("subtotal", "SUBTOTAL", w_dict.get("subtotal", 90), "e", False),
-            ("gst", "GST", w_dict.get("gst", 80), "e", False),
-            ("total", "TOTAL", w_dict.get("total", 100), "e", False), 
-            ("tds", "TDS", w_dict.get("tds", 80), "e", False),
-            ("paid", "RECEIVED", w_dict.get("paid", 100), "e", False), 
-            ("due", "BALANCE", w_dict.get("due", 100), "e", False), 
-            ("woff", "WRITTEN OFF", w_dict.get("woff", 100), "e", False), 
-            ("status", "STATUS", w_dict.get("status", 120), "center", False),
+            ("date", "DATE", w_dict.get("date", 90), "center", True), 
+            ("inv_num", "INVOICE NO.", w_dict.get("inv_num", 110), "w", True), 
+            ("subtotal", "SUBTOTAL", w_dict.get("subtotal", 90), "e", True),
+            ("gst", "GST", w_dict.get("gst", 80), "e", True),
+            ("total", "TOTAL", w_dict.get("total", 100), "e", True), 
+            ("tds", "TDS", w_dict.get("tds", 80), "e", True),
+            ("paid", "RECEIVED", w_dict.get("paid", 100), "e", True), 
+            ("due", "BALANCE", w_dict.get("due", 100), "e", True), 
+            ("woff", "WRITTEN OFF", w_dict.get("woff", 100), "e", True), 
+            ("status", "STATUS", w_dict.get("status", 120), "center", True),
             ("ghost", "", 10, "center", True)
         ]
         
@@ -269,8 +269,12 @@ class InvoicePaymentPortal:
     def on_motion(self, event):
         region = self.tree.identify("region", event.x, event.y)
         col = self.tree.identify_column(event.x)
-        if region == "cell" and col in ("#2", "#10"): 
-            self.tree.config(cursor="hand2")
+        if region == "cell":
+            col_id = self.tree.column(col, "id")
+            if col_id in ("inv_num", "status"): 
+                self.tree.config(cursor="hand2")
+            else: 
+                self.tree.config(cursor="")
         else: 
             self.tree.config(cursor="")
 
@@ -282,7 +286,7 @@ class InvoicePaymentPortal:
             if not item or "empty" in self.tree.item(item[0], "tags"): return
             b_id = item[0]
             
-            if col == "#10":
+            if self.tree.column(col, "id") == "status":
                 for r in self.raw_bills:
                     if str(r[0]) == b_id:
                         if float(r[7] or 0.0) <= 0.01:
@@ -313,28 +317,41 @@ class InvoicePaymentPortal:
         try:
             conn = database.get_connection()
             c = conn.cursor()
-            # --- THE FIX: Fetch invoices by ID to prevent twin mixing! ---
+            # --- THE FIX: Added place_of_service so we can extract discounts for the Taxable Subtotal! ---
             if self.cust_id:
-                c.execute("SELECT id, invoice_date, invoice_number, subtotal, (cgst+sgst+igst) as total_gst, total, amount_paid, balance_due, write_off, status FROM invoices WHERE customer_id=? AND company_id=? AND is_deleted=0 AND status != 'Draft' ORDER BY invoice_date ASC", (self.cust_id, self.comp_id))
+                c.execute("SELECT id, invoice_date, invoice_number, subtotal, (cgst+sgst+igst) as total_gst, total, amount_paid, balance_due, write_off, status, place_of_service FROM invoices WHERE customer_id=? AND company_id=? AND is_deleted=0 AND status != 'Draft' ORDER BY invoice_date ASC", (self.cust_id, self.comp_id))
             else:
-                c.execute("SELECT id, invoice_date, invoice_number, subtotal, (cgst+sgst+igst) as total_gst, total, amount_paid, balance_due, write_off, status FROM invoices WHERE customer_name=? AND company_id=? AND is_deleted=0 AND status != 'Draft' ORDER BY invoice_date ASC", (self.customer_name, self.comp_id))
+                c.execute("SELECT id, invoice_date, invoice_number, subtotal, (cgst+sgst+igst) as total_gst, total, amount_paid, balance_due, write_off, status, place_of_service FROM invoices WHERE customer_name=? AND company_id=? AND is_deleted=0 AND status != 'Draft' ORDER BY invoice_date ASC", (self.customer_name, self.comp_id))
             self.raw_bills = c.fetchall()
             
-            # --- THE FIX: Fetch TDS history across this customer's active invoices ---
-            c.execute("SELECT ref, amount FROM party_payments WHERE company_id=? AND mode='TDS Deduction'", (self.comp_id,))
+            # --- THE FIX: Fetch TDS history strictly for this customer's sales invoices ---
+            def _parse_tds_num(raw_s):
+                s = re.sub(r'[^\d\.,]', '', str(raw_s or "")).strip()
+                if not s: return 0.0
+                if "," in s and "." in s:
+                    s = s.replace(".", "").replace(",", ".") if s.rfind(",") > s.rfind(".") else s.replace(",", "")
+                elif "," in s:
+                    s = s.replace(",", ".") if (len(s.split(",")) == 2 and len(s.split(",")[1]) <= 2) else s.replace(",", "")
+                try: return abs(float(s))
+                except: return 0.0
+
+            if self.cust_id:
+                c.execute("SELECT ref, amount FROM party_payments WHERE company_id=? AND (party_id=? OR (party_id IS NULL AND party_name=?)) AND pay_type='receive' AND mode='TDS Deduction'", (self.comp_id, self.cust_id, self.customer_name))
+            else:
+                c.execute("SELECT ref, amount FROM party_payments WHERE company_id=? AND party_name=? AND pay_type='receive' AND mode='TDS Deduction'", (self.comp_id, self.customer_name))
             self.tds_map = {}
             for ref_str, amt in c.fetchall():
                 if ref_str:
-                    for part in str(ref_str).split(" | "):
-                        b_no = part.split(" (")[0].strip()
-                        m = re.search(r'\((.*?)\)', part)
-                        if m:
-                            clean_amt = re.sub(r'[^\d\.]', '', m.group(1))
-                            try: self.tds_map[b_no] = self.tds_map.get(b_no, 0.0) + float(clean_amt)
-                            except: pass
-                        else:
-                            self.tds_map[b_no] = self.tds_map.get(b_no, 0.0) + float(amt or 0.0)
-            # -------------------------------------------------------------
+                    parts = str(ref_str).split(" | ")
+                    if len(parts) == 1:
+                        b_no = parts[0].split(" (")[0].strip()
+                        self.tds_map[b_no] = self.tds_map.get(b_no, 0.0) + abs(float(amt or 0.0))
+                    else:
+                        for part in parts:
+                            b_no = part.split(" (")[0].strip()
+                            m = re.search(r'\((.*?)\)', part)
+                            self.tds_map[b_no] = self.tds_map.get(b_no, 0.0) + (_parse_tds_num(m.group(1)) if m else 0.0)
+            # ------------------------------------------------------------------------------
             conn.close()
             
             tot_billed = 0.0
@@ -344,8 +361,25 @@ class InvoicePaymentPortal:
             idx = 0
             
             for r in self.raw_bills:
-                b_id, p_date, b_num, sub, total_gst, tot, paid, due, woff, stat = r
+                b_id, p_date, b_num, sub, total_gst, tot, paid, due, woff, stat = r[:10]
+                place_str = str(r[10]) if len(r) > 10 and r[10] else ""
                 woff = woff if woff else 0.0
+                
+                # --- THE FIX: Extract Discount to show true Taxable Subtotal! ---
+                disc_amt = 0.0
+                if "@@DISC@@" in place_str:
+                    m_disc = re.search(r'@@DISC@@(.*?)@@', place_str + "@@")
+                    if m_disc:
+                        d_parts = m_disc.group(1).split('||')
+                        if len(d_parts) > 0 and str(d_parts[0]).strip() == "1":
+                            try: d_val = float(d_parts[1].strip() or 0.0)
+                            except: d_val = 0.0
+                            d_typ = d_parts[2].strip() if len(d_parts) > 2 else "%"
+                            if "%" in d_typ: disc_amt = float(sub or 0.0) * (d_val / 100.0)
+                            else: disc_amt = d_val
+                            
+                taxable_sub = max(0.0, float(sub or 0.0) - disc_amt)
+                # ----------------------------------------------------------------
                 
                 tot_billed += float(tot or 0.0)
                 tot_paid += float(paid or 0.0)
@@ -371,10 +405,10 @@ class InvoicePaymentPortal:
                 fmt_date = smart_date_formatter(p_date, self.date_fmt)
                 tds_val = self.tds_map.get(b_num, 0.0)
                 
-                # --- THE FIX: Insert all 11 columns including Subtotal, GST, and TDS! ---
+                # --- THE FIX: Insert Taxable Subtotal instead of Raw Subtotal! ---
                 self.tree.insert("", "end", iid=str(b_id), values=(
                     fmt_date, b_num, 
-                    format_currency(sub, self.curr_fmt), format_currency(total_gst, self.curr_fmt),
+                    format_currency(taxable_sub, self.curr_fmt), format_currency(total_gst, self.curr_fmt),
                     format_currency(tot, self.curr_fmt), format_currency(tds_val, self.curr_fmt),
                     format_currency(paid, self.curr_fmt), format_currency(running_bal, self.curr_fmt), 
                     format_currency(woff, self.curr_fmt), stat_txt, ""
@@ -449,7 +483,7 @@ class InvoicePaymentPortal:
             
             if payload.get("wallet_change"):
                 from views.invoice_parts.portal_popups import update_wallet_balance
-                update_wallet_balance(c, self.comp_id, self.customer_name, -payload["wallet_change"])
+                update_wallet_balance(c, self.comp_id, self.customer_name, -payload["wallet_change"], self.cust_id)
                 
             for pid in payload.get("payment_ids", []):
                 c.execute("DELETE FROM party_payments WHERE id=?", (pid,))
@@ -475,7 +509,7 @@ class InvoicePaymentPortal:
             
             if payload.get("wallet_change"):
                 from views.invoice_parts.portal_popups import update_wallet_balance
-                update_wallet_balance(c, self.comp_id, self.customer_name, payload["wallet_change"])
+                update_wallet_balance(c, self.comp_id, self.customer_name, payload["wallet_change"], self.cust_id)
                 
             for pay_row in payload.get("payment_rows", []):
                 if len(pay_row) == 11:
@@ -659,10 +693,17 @@ class InvoicePaymentPortal:
                     log_id = r[0]
                     p_date = smart_date_formatter(r[1], self.date_fmt)
                     mode = r[2]
-                    ref = format_ref(r[3])
-                    
-                    raw_amt = float(r[4] or 0.0)
+                    raw_ref_str = str(r[3] or "")
+                    ref_lower = raw_ref_str.lower()
                     p_type = r[7] if len(r) > 7 else 'receive'
+                    
+                    if p_type == 'receive' and 'refunded from vendor' in ref_lower:
+                        continue
+                    if p_type == 'make' and 'refunded to customer' not in ref_lower and 'offset' not in ref_lower:
+                        continue
+
+                    ref = format_ref(raw_ref_str)
+                    raw_amt = float(r[4] or 0.0)
                     
                     # --- THE FIX: Apply the minus signs and Refund tags dynamically ---
                     if p_type == 'make':
@@ -738,18 +779,12 @@ class InvoicePaymentPortal:
                                 conn.close()
                                 
                                 from views.invoice_parts.helpers import get_vault_path
-                                base_dir = get_vault_path(ROOT_DIR, self.comp_id, self.customer_name, "invoice_payment_receipts", cust_id)
                                 
-                                # --- THE FIX: Organize into YYYY/Month folders based on the row's payment date! ---
                                 from datetime import datetime
-                                try:
-                                    dt = datetime.strptime(row_vals[0], self.date_fmt)
-                                    safe_dir = os.path.join(base_dir, dt.strftime("%Y"), dt.strftime("%B"))
-                                except:
-                                    dt = datetime.now()
-                                    safe_dir = os.path.join(base_dir, dt.strftime("%Y"), dt.strftime("%B"))
-                                os.makedirs(safe_dir, exist_ok=True)
-                                # ----------------------------------------------------------------------------------
+                                try: dt = datetime.strptime(row_vals[0], self.date_fmt)
+                                except: dt = datetime.now()
+
+                                safe_dir = get_vault_path(ROOT_DIR, self.comp_id, self.customer_name, "invoice_payment_receipts", cust_id, dt)
                                 
                                 ext = os.path.splitext(path)[1] or ".png"
                                 # ---------------------------------------------------

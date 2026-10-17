@@ -21,11 +21,14 @@ import database
 from views.invoice_parts.calendar_widget import NativeCalendar
 from views.invoice_parts.helpers import enable_copy_paste, format_currency, fetch_global_settings, smart_date_formatter
 
-def get_wallet_balance(comp_id, name):
+def get_wallet_balance(comp_id, name, cust_id=None):
     try:
         conn = database.get_connection()
         c = conn.cursor()
-        c.execute("SELECT address FROM customers WHERE name=? AND company_id=?", (name, comp_id))
+        if cust_id:
+            c.execute("SELECT address FROM customers WHERE id=? AND company_id=?", (cust_id, comp_id))
+        else:
+            c.execute("SELECT address FROM customers WHERE name=? AND company_id=?", (name, comp_id))
         row = c.fetchone()
         conn.close()
         if row and row[0]:
@@ -36,10 +39,13 @@ def get_wallet_balance(comp_id, name):
     except: pass
     return 0.0
 
-def update_wallet_balance(c, comp_id, name, amount_change):
+def update_wallet_balance(c, comp_id, name, amount_change, cust_id=None):
     if amount_change == 0: return
     try:
-        c.execute("SELECT id, address FROM customers WHERE name=? AND company_id=?", (name, comp_id))
+        if cust_id:
+            c.execute("SELECT id, address FROM customers WHERE id=? AND company_id=?", (cust_id, comp_id))
+        else:
+            c.execute("SELECT id, address FROM customers WHERE name=? AND company_id=?", (name, comp_id))
         row = c.fetchone()
         if row:
             c_id = row[0]; raw_addr = row[1]
@@ -67,7 +73,7 @@ def open_receive_advance_dialog(portal, parent_popup, customer_name, refresh_cb,
     comp_id = portal.comp_id
     curr_format, date_fmt = fetch_global_settings(comp_id)
     
-    current_wallet_bal = get_wallet_balance(comp_id, customer_name)
+    current_wallet_bal = get_wallet_balance(comp_id, customer_name, getattr(portal, 'cust_id', None))
     
     pop = tk.Toplevel(parent_popup)
     pop.title(f"Manage Advance: {customer_name}")
@@ -210,17 +216,11 @@ def open_receive_advance_dialog(portal, parent_popup, customer_name, refresh_cb,
             conn.close()
             
             from views.invoice_parts.helpers import get_vault_path
-            base_dir = get_vault_path(ROOT_DIR, comp_id, customer_name, "invoice_payment_receipts", cust_id)
             
-            # --- THE FIX: Organize into YYYY/Month folders to prevent Hard Drive Bloat! ---
-            try:
-                dt = datetime.strptime(date_var.get(), date_fmt)
-                safe_dir = os.path.join(base_dir, dt.strftime("%Y"), dt.strftime("%B"))
-            except:
-                dt = datetime.now()
-                safe_dir = os.path.join(base_dir, dt.strftime("%Y"), dt.strftime("%B"))
-            os.makedirs(safe_dir, exist_ok=True)
-            # ------------------------------------------------------------------------------
+            try: dt = datetime.strptime(date_var.get(), date_fmt)
+            except: dt = datetime.now()
+            
+            safe_dir = get_vault_path(ROOT_DIR, comp_id, customer_name, "invoice_payment_receipts", cust_id, txn_date=dt)
             
             ext = os.path.splitext(r_path)[1] or ".png"
             prefix = "advance_refund" if is_refund else "advance"
@@ -236,7 +236,7 @@ def open_receive_advance_dialog(portal, parent_popup, customer_name, refresh_cb,
             c = conn.cursor()
             
             db_amt = -amt if is_refund else amt
-            update_wallet_balance(c, comp_id, customer_name, db_amt)
+            update_wallet_balance(c, comp_id, customer_name, db_amt, getattr(portal, 'cust_id', None))
 
             ref_label = "Refunded to Customer" if is_refund else "Advance Wallet"
             
@@ -289,8 +289,18 @@ def open_partial_payment_dialog(portal, parent_popup, bill_data, refresh_cb, cus
     comp_id = portal.comp_id
     curr_format, date_fmt = fetch_global_settings(comp_id)
 
-    raw_wallet = get_wallet_balance(comp_id, customer_name)
+    raw_wallet = get_wallet_balance(comp_id, customer_name, getattr(portal, 'cust_id', None))
     available_credit = raw_wallet if raw_wallet > 0 else 0.0
+
+    is_waive_blocked = False
+    app_root = getattr(portal.parent_view, "app", parent_popup.winfo_toplevel())
+    curr_role = getattr(app_root, "current_role", "Admin")
+    curr_uid = getattr(app_root, "current_user_id", None) or getattr(database, "ACTIVE_USER_ID", 1)
+    if curr_role != "Admin" and str(curr_uid) != "1":
+        u_perms = database.get_user_permissions(curr_uid)
+        p_rules = u_perms.get("party_rules", {}) if isinstance(u_perms.get("party_rules"), dict) else {}
+        if p_rules.get("block_waive_off", False):
+            is_waive_blocked = True
 
     pay_pop = tk.Toplevel(parent_popup)
     pay_pop.title(f"Receive Payment: {b_num}")
@@ -399,10 +409,28 @@ def open_partial_payment_dialog(portal, parent_popup, bill_data, refresh_cb, cus
     try:
         conn = database.get_connection()
         c = conn.cursor()
-        c.execute("SELECT subtotal FROM invoices WHERE id=?", (b_id,))
+        c.execute("SELECT subtotal, place_of_service FROM invoices WHERE id=?", (b_id,))
         res_sub = c.fetchone()
         conn.close()
-        bill_subtotal = float(res_sub[0] or 0.0) if res_sub else tot
+        
+        if res_sub:
+            sub = float(res_sub[0] or 0.0)
+            place_str = str(res_sub[1] or "")
+            import re
+            disc_amt = 0.0
+            if "@@DISC@@" in place_str:
+                m_disc = re.search(r'@@DISC@@(.*?)@@', place_str + "@@")
+                if m_disc:
+                    d_parts = m_disc.group(1).split('||')
+                    if len(d_parts) > 0 and str(d_parts[0]).strip() == "1":
+                        try: d_val = float(d_parts[1].strip() or 0.0)
+                        except: d_val = 0.0
+                        d_typ = d_parts[2].strip() if len(d_parts) > 2 else "%"
+                        if "%" in d_typ: disc_amt = sub * (d_val / 100.0)
+                        else: disc_amt = d_val
+            bill_subtotal = max(0.0, sub - disc_amt)
+        else:
+            bill_subtotal = tot
     except: bill_subtotal = tot
 
     # --- THE FIX: SMART TDS UI WITH PERCENTAGE AUTO-FILL FOR SINGLE PAYMENT ---
@@ -495,7 +523,7 @@ def open_partial_payment_dialog(portal, parent_popup, bill_data, refresh_cb, cus
                 adv_info_lbl.config(fg=t["error"])
                 adv_info_lbl.grid(row=7, column=0, columnspan=3, sticky="w", pady=(5, 0))
                 pay_pop.geometry(f"{pop_w}x{pop_h + 60}")
-            elif 0 <= eff_amt < actual_bal:
+            elif 0 <= eff_amt < actual_bal and not is_waive_blocked:
                 diff = actual_bal - eff_amt
                 waive_chk.config(text=f"Waive remaining {format_currency(diff, curr_format)} (Write-Off)")
                 waive_chk.grid(row=7, column=0, columnspan=3, sticky="w", pady=(5, 0))
@@ -504,7 +532,7 @@ def open_partial_payment_dialog(portal, parent_popup, bill_data, refresh_cb, cus
                 waive_var.set(False)
                 pay_pop.geometry(f"{pop_w}x{pop_h + 30}")
         else:
-            if 0 <= eff_amt < actual_bal:
+            if 0 <= eff_amt < actual_bal and not is_waive_blocked:
                 diff = actual_bal - eff_amt
                 waive_chk.config(text=f"Waive remaining {format_currency(diff, curr_format)} (Write-Off)")
                 # --- THE FIX: Moved to Row 7 to stop UI collisions! ---
@@ -574,16 +602,12 @@ def open_partial_payment_dialog(portal, parent_popup, bill_data, refresh_cb, cus
             conn.close()
             
             from views.invoice_parts.helpers import get_vault_path
-            base_dir = get_vault_path(ROOT_DIR, comp_id, customer_name, "invoice_payment_receipts", cust_id)
             safe_bill = re.sub(r'[\\/*?:"<>|]', "_", b_num).strip()
             
-            try:
-                dt = datetime.strptime(date_var.get(), date_fmt)
-                safe_dir = os.path.join(base_dir, dt.strftime("%Y"), dt.strftime("%B"))
-            except:
-                dt = datetime.now()
-                safe_dir = os.path.join(base_dir, dt.strftime("%Y"), dt.strftime("%B"))
-            os.makedirs(safe_dir, exist_ok=True)
+            try: dt = datetime.strptime(date_var.get(), date_fmt)
+            except: dt = datetime.now()
+            
+            safe_dir = get_vault_path(ROOT_DIR, comp_id, customer_name, "invoice_payment_receipts", cust_id, txn_date=dt)
             
             ext = os.path.splitext(r_path)[1] or ".png"
             final_attach = os.path.join(safe_dir, f"payment_{safe_bill}_{int(time.time()*1000)}{ext}")
@@ -599,8 +623,8 @@ def open_partial_payment_dialog(portal, parent_popup, bill_data, refresh_cb, cus
             
             old_inv_state = {"id": b_id, "paid": paid, "bal": bal, "woff": woff, "status": stat}
             
-            if is_wallet: update_wallet_balance(c, comp_id, customer_name, -actual_payment) 
-            elif overpayment > 0: update_wallet_balance(c, comp_id, customer_name, overpayment) 
+            if is_wallet: update_wallet_balance(c, comp_id, customer_name, -actual_payment, getattr(portal, 'cust_id', None)) 
+            elif overpayment > 0: update_wallet_balance(c, comp_id, customer_name, overpayment, getattr(portal, 'cust_id', None)) 
 
             c.execute("UPDATE invoices SET amount_paid=?, balance_due=?, write_off=?, status=? WHERE id=? AND company_id=?", (new_paid, new_bal, new_woff, new_status, b_id, comp_id))
             new_inv_state = {"id": b_id, "paid": new_paid, "bal": new_bal, "woff": new_woff, "status": new_status}
@@ -736,7 +760,11 @@ def open_auto_payment_dialog(portal, parent_popup, customer_name, refresh_cb, un
     
     conn = database.get_connection()
     c = conn.cursor()
-    c.execute("SELECT id, invoice_date, invoice_number, total, amount_paid, balance_due, write_off, status, subtotal FROM invoices WHERE customer_name=? AND company_id=? AND is_deleted=0 AND status != 'Draft' ORDER BY invoice_date ASC", (customer_name, comp_id))
+    cust_id_portal = getattr(portal, 'cust_id', None)
+    if cust_id_portal:
+        c.execute("SELECT id, invoice_date, invoice_number, total, amount_paid, balance_due, write_off, status, subtotal, place_of_service FROM invoices WHERE (customer_id=? OR (customer_id IS NULL AND customer_name=?)) AND company_id=? AND is_deleted=0 AND status != 'Draft' ORDER BY invoice_date ASC", (cust_id_portal, customer_name, comp_id))
+    else:
+        c.execute("SELECT id, invoice_date, invoice_number, total, amount_paid, balance_due, write_off, status, subtotal, place_of_service FROM invoices WHERE customer_name=? AND company_id=? AND is_deleted=0 AND status != 'Draft' ORDER BY invoice_date ASC", (customer_name, comp_id))
     raw_unpaid = c.fetchall()
     conn.close()
     
@@ -746,20 +774,46 @@ def open_auto_payment_dialog(portal, parent_popup, customer_name, refresh_cb, un
     for r in raw_unpaid:
         b_id, p_date, b_num, tot, paid_so_far, bal_due, woff, stat = r[:8]
         sub = float(r[8] or 0.0) if len(r) > 8 else float(tot or 0.0)
+        place_str = str(r[9] or "") if len(r) > 9 else ""
+        
+        import re
+        disc_amt = 0.0
+        if "@@DISC@@" in place_str:
+            m_disc = re.search(r'@@DISC@@(.*?)@@', place_str + "@@")
+            if m_disc:
+                d_parts = m_disc.group(1).split('||')
+                if len(d_parts) > 0 and str(d_parts[0]).strip() == "1":
+                    try: d_val = float(d_parts[1].strip() or 0.0)
+                    except: d_val = 0.0
+                    d_typ = d_parts[2].strip() if len(d_parts) > 2 else "%"
+                    if "%" in d_typ: disc_amt = sub * (d_val / 100.0)
+                    else: disc_amt = d_val
+        taxable_sub = max(0.0, sub - disc_amt)
+        
         woff = woff if woff else 0.0
         actual_due = max(0.0, float(tot or 0.0) - float(paid_so_far or 0.0) - woff)
         if actual_due > 0.01:
             unpaid.append((b_id, p_date, b_num, tot, paid_so_far, bal_due, woff, stat))
             raw_balances[str(b_id)] = actual_due
-            raw_subtotals[str(b_id)] = sub
+            raw_subtotals[str(b_id)] = taxable_sub
             
     if not unpaid:
         messagebox.showinfo("Done", "No unpaid invoices found for this customer.", parent=parent_popup)
         return
         
     total_due = sum(raw_balances.values())
-    raw_wallet = get_wallet_balance(comp_id, customer_name)
+    raw_wallet = get_wallet_balance(comp_id, customer_name, getattr(portal, 'cust_id', None))
     available_credit = raw_wallet if raw_wallet > 0 else 0.0
+
+    is_waive_blocked = False
+    app_root = getattr(portal.parent_view, "app", parent_popup.winfo_toplevel())
+    curr_role = getattr(app_root, "current_role", "Admin")
+    curr_uid = getattr(app_root, "current_user_id", None) or getattr(database, "ACTIVE_USER_ID", 1)
+    if curr_role != "Admin" and str(curr_uid) != "1":
+        u_perms = database.get_user_permissions(curr_uid)
+        p_rules = u_perms.get("party_rules", {}) if isinstance(u_perms.get("party_rules"), dict) else {}
+        if p_rules.get("block_waive_off", False):
+            is_waive_blocked = True
     
     auto_pop = tk.Toplevel(parent_popup)
     auto_pop.title(f"Selective Bulk Allocation: {customer_name}")
@@ -1021,7 +1075,7 @@ def open_auto_payment_dialog(portal, parent_popup, customer_name, refresh_cb, un
             unallocated_var.set(f"⚠️ Overpayment Blocked: {format_currency(abs(remaining_unaccounted), curr_format)}")
         else:
             unallocated_var.set("")
-            if 0 <= remaining_unaccounted <= current_selection_sum and remaining_unaccounted > 0.01:
+            if 0 <= remaining_unaccounted <= current_selection_sum and remaining_unaccounted > 0.01 and not is_waive_blocked:
                 waive_chk.config(text=f"Waive remaining {format_currency(remaining_unaccounted, curr_format)} (Write-Off)")
                 waive_chk.grid(row=4, column=0, columnspan=5, sticky="w", pady=5)
                 auto_pop.geometry(f"{pop_w}x{pop_h + 40}")
@@ -1148,17 +1202,11 @@ def open_auto_payment_dialog(portal, parent_popup, customer_name, refresh_cb, un
             conn.close()
             
             from views.invoice_parts.helpers import get_vault_path
-            base_dir = get_vault_path(ROOT_DIR, comp_id, customer_name, "invoice_payment_receipts", cust_id)
             
-            # --- THE FIX: Organize into YYYY/Month folders to prevent Hard Drive Bloat! ---
-            try:
-                dt = datetime.strptime(date_var.get(), date_fmt)
-                safe_dir = os.path.join(base_dir, dt.strftime("%Y"), dt.strftime("%B"))
-            except:
-                dt = datetime.now()
-                safe_dir = os.path.join(base_dir, dt.strftime("%Y"), dt.strftime("%B"))
-            os.makedirs(safe_dir, exist_ok=True)
-            # ------------------------------------------------------------------------------
+            try: dt = datetime.strptime(date_var.get(), date_fmt)
+            except: dt = datetime.now()
+            
+            safe_dir = get_vault_path(ROOT_DIR, comp_id, customer_name, "invoice_payment_receipts", cust_id, txn_date=dt)
             
             ext = os.path.splitext(r_path)[1] or ".png"
             final_attach = os.path.join(safe_dir, f"bulk_payment_{int(time.time()*1000)}{ext}")
@@ -1210,13 +1258,13 @@ def open_auto_payment_dialog(portal, parent_popup, customer_name, refresh_cb, un
                                   (new_paid, new_bal, new_woff, new_status, b_id, comp_id))
                         
                         if alloc_cash > 0:
-                            breakdown_cash.append(f"{b_num} ({format_currency(alloc_cash, curr_format)})")
+                            breakdown_cash.append(f"{b_num} ({alloc_cash:.2f})")
                             actual_cash_applied += alloc_cash
                         if alloc_tds > 0:
-                            breakdown_tds.append(f"{b_num} ({format_currency(alloc_tds, curr_format)})")
+                            breakdown_tds.append(f"{b_num} ({alloc_tds:.2f})")
                             actual_tds_applied += alloc_tds
                         if alloc_woff > 0:
-                            breakdown_woff.append(f"{b_num} ({format_currency(alloc_woff, curr_format)})")
+                            breakdown_woff.append(f"{b_num} ({alloc_woff:.2f})")
                             actual_woff_applied += alloc_woff
 
             # --- THE FIX: Capture new states for Redo! ---
@@ -1227,7 +1275,7 @@ def open_auto_payment_dialog(portal, parent_popup, customer_name, refresh_cb, un
                 new_inv_states.append({"id": inv_dict["id"], "paid": r[0], "bal": r[1], "woff": r[2], "status": r[3]})
             # ---------------------------------------------
 
-            if is_wallet: update_wallet_balance(c, comp_id, customer_name, -actual_cash_applied)
+            if is_wallet: update_wallet_balance(c, comp_id, customer_name, -actual_cash_applied, getattr(portal, 'cust_id', None))
 
             inserted_ids = []
             inserted_rows = []

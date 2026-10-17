@@ -2,7 +2,27 @@ import tkinter as tk
 import json
 import os
 import sys
+import ast
 from datetime import datetime
+
+# --- THE FIX: Centralized Address Extractor ---
+def extract_address(addr_str):
+    if not addr_str: return ""
+    s_val = str(addr_str).strip()
+    if s_val.startswith("{"):
+        try:
+            d = json.loads(s_val)
+            if isinstance(d, dict) and "address" in d: return d["address"]
+        except: pass
+        try:
+            d = ast.literal_eval(s_val)
+            if isinstance(d, dict) and "address" in d: return d["address"]
+        except: pass
+        import re
+        match = re.search(r'(?:"|\')address(?:"|\')\s*:\s*(?:"|\')(.*?)(?:"|\')\s*(?:,|})', s_val)
+        if match: return match.group(1)
+    return s_val
+# ----------------------------------------------
 
 # --- THE FIX: Centralized GST State Codes ---
 GST_STATE_CODES = {
@@ -241,10 +261,13 @@ def number_to_words(n, format_type=None):
         try: format_type = fetch_global_settings()[0]
         except: format_type = "Indian Rupees (₹)"
         
-    try: n = int(float(n))
+    try: 
+        raw_n = float(n)
+        main_part = int(raw_n)
+        dec_part = int(round((raw_n - main_part) * 100))
     except: return ""
     
-    if n == 0: 
+    if main_part == 0 and dec_part == 0: 
         if "Dollar" in format_type: return "Zero Dollars Only"
         elif "Euro" in format_type: return "Zero Euros Only"
         elif "Pound" in format_type: return "Zero Pounds Only"
@@ -255,43 +278,59 @@ def number_to_words(n, format_type=None):
     def get_words(num):
         if num == 0: return ""
         elif num < 20: return words[num] + " "
-        elif num < 100: return words[(num//10)*10] + " " + words[num%10] + " "
+        elif num < 100: return words[(num//10)*10] + (" " + words[num%10] if num%10 != 0 else "") + " "
         else: return words[num//100] + " Hundred " + get_words(num%100)
         
     res = ""
     
-    if format_type in ["US Dollar ($)", "Euro (€)", "British Pound (£)", "Generic Number"]:
-        if n >= 1000000000: 
-            res += get_words(n // 1000000000) + "Billion "
-            n %= 1000000000
-        if n >= 1000000: 
-            res += get_words(n // 1000000) + "Million "
-            n %= 1000000
-        if n >= 1000: 
-            res += get_words(n // 1000) + "Thousand "
-            n %= 1000
-        res += get_words(n)
+    if any(k in str(format_type) for k in ("Dollar", "Euro", "Pound", "Generic")):
+        n_temp = main_part
+        if n_temp >= 1000000000: 
+            res += get_words(n_temp // 1000000000) + "Billion "
+            n_temp %= 1000000000
+        if n_temp >= 1000000: 
+            res += get_words(n_temp // 1000000) + "Million "
+            n_temp %= 1000000
+        if n_temp >= 1000: 
+            res += get_words(n_temp // 1000) + "Thousand "
+            n_temp %= 1000
+        res += get_words(n_temp)
         
         suffix = ""
+        dec_name = "Cents"
         if "Dollar" in format_type: suffix = " Dollars"
         elif "Euro" in format_type: suffix = " Euros"
-        elif "Pound" in format_type: suffix = " Pounds"
+        elif "Pound" in format_type: 
+            suffix = " Pounds"
+            dec_name = "Pence"
             
-        return res.strip() + suffix + " Only"
+        final_str = res.strip() + suffix
+        if dec_part > 0:
+            if final_str: final_str += " and "
+            final_str += f"{get_words(dec_part).strip()} {dec_name}"
+        return final_str.strip() + " Only"
 
     else:
-        if n >= 10000000: 
-            res += get_words(n // 10000000) + "Crore "
-            n %= 10000000
-        if n >= 100000: 
-            res += get_words(n // 100000) + "Lakh "
-            n %= 100000
-        if n >= 1000: 
-            res += get_words(n // 1000) + "Thousand "
-            n %= 1000
-        res += get_words(n)
+        n_temp = main_part
+        if n_temp >= 10000000: 
+            res += get_words(n_temp // 10000000) + "Crore "
+            n_temp %= 10000000
+        if n_temp >= 100000: 
+            res += get_words(n_temp // 100000) + "Lakh "
+            n_temp %= 100000
+        if n_temp >= 1000: 
+            res += get_words(n_temp // 1000) + "Thousand "
+            n_temp %= 1000
+        res += get_words(n_temp)
         
-        return res.strip() + " Rupees Only"
+        final_str = res.strip() + " Rupees"
+        if main_part == 0:
+            final_str = ""
+        if dec_part > 0:
+            if final_str: final_str += " and "
+            final_str += f"{get_words(dec_part).strip()} Paise"
+            
+        return final_str.strip() + " Only"
 
 def format_currency(num, format_type=None):
     if format_type is None:
@@ -370,7 +409,8 @@ def calculate_pagination(settings, items, page_h, top_space, sf, w, dynamic_bott
     for idx, item in enumerate(items, 1):
         it = item.get("data", {})
         name = str(it.get("name", ""))
-        clean_name = name.replace("@@B@@", "").replace("@@U@@", "")
+        import re
+        clean_name = re.sub(r'(\[B\]|\[/B\]|\[U\]|\[/U\]|@@B@@|@@U@@)', '', name)
         
         lines = 0
         for seg in clean_name.split('\n'):
@@ -586,11 +626,20 @@ def unpack_place_data(packed_str, state):
         if len(parts) > 1: state.discount_val_var.set(parts[1])
         if len(parts) > 2: state.discount_type_var.set(parts[2])
 
+    if not hasattr(state, 'adv_date_var'):
+        state.adv_date_var = tk.StringVar(value=datetime.now().strftime(target_fmt))
+    if not hasattr(state, 'adv_mode_var'):
+        state.adv_mode_var = tk.StringVar(value="Cash")
+
     adv_m = re.search(r'@@ADV@@(.*?)@@', packed_str + "@@", re.DOTALL)
     if adv_m:
         parts = adv_m.group(1).split('||')
         if len(parts) > 0: state.inc_adv_var.set(int(parts[0]))
         if len(parts) > 1: state.adv_val_var.set(parts[1])
+        if len(parts) > 2 and parts[2].strip():
+            state.adv_date_var.set(smart_date_formatter(parts[2].strip(), target_fmt))
+        if len(parts) > 3 and parts[3].strip():
+            state.adv_mode_var.set(parts[3].strip())
         
     page_m = re.search(r'@@PAGE@@(.*?)@@', packed_str + "@@", re.DOTALL)
     if page_m:
@@ -606,25 +655,48 @@ def unpack_place_data(packed_str, state):
         except: pass
 
 # =====================================================================================
-# THE FIX: CENTRALIZED VAULT PATHING (Master File Manager)
+# THE FIX: CENTRALIZED VAULT PATHING (Master File Manager - CRM Style)
 # =====================================================================================
-def get_vault_path(root_dir, comp_id, entity_name, module_folder="Documents", entity_id=None):
+def get_vault_path(root_dir, comp_id, entity_name, module_folder="Documents", entity_id=None, txn_date=None):
     import os, re
+    from datetime import datetime
     try:
-        # --- REVERT: Using the dynamic Company Name ---
         import database
         comp = database.get_company(comp_id)
         comp_name = comp[1] if comp else f"Company_{comp_id}"
         safe_comp = re.sub(r'[\\/*?:"<>|]', "", comp_name).strip()
         
+        base_vault = os.path.join(root_dir, "Vault", safe_comp)
         safe_entity_name = re.sub(r'[\\/*?:"<>|]', "", entity_name).strip()
         
-        if entity_id:
-            safe_entity = f"{safe_entity_name}_ID_{entity_id}"
-        else:
-            safe_entity = safe_entity_name
+        entity_folder = safe_entity_name
+        
+        if entity_id and str(entity_id) not in ["0", "None", ""]:
+            target_suffix = f"_ID_{entity_id}"
             
-        safe_dir = os.path.join(root_dir, "Vault", safe_comp, module_folder, safe_entity)
+            # Make the folder "sticky" by searching the root company vault
+            found_existing = False
+            if os.path.exists(base_vault):
+                for folder in os.listdir(base_vault):
+                    if folder.endswith(target_suffix):
+                        entity_folder = folder
+                        found_existing = True
+                        break
+            
+            if not found_existing:
+                entity_folder = f"{safe_entity_name}{target_suffix}"
+                
+        # Generate the Year and Month dynamically based on the specific transaction date!
+        if txn_date and hasattr(txn_date, 'strftime'):
+            year_str = txn_date.strftime("%Y")
+            month_str = txn_date.strftime("%B") 
+        else:
+            now = datetime.now()
+            year_str = now.strftime("%Y")
+            month_str = now.strftime("%B") 
+        
+        # Build the new CRM-style path: Vault/Company/Person/Module/Year/Month
+        safe_dir = os.path.join(base_vault, entity_folder, module_folder, year_str, month_str)
         os.makedirs(safe_dir, exist_ok=True)
         return safe_dir
     except:

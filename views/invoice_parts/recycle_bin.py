@@ -163,9 +163,16 @@ def open_recycle_bin(view):
             messagebox.showinfo("Restored", "Invoice successfully restored.", parent=pop)
 
     def hard_clear_inv(inv_id):
-        if not is_admin:
-            messagebox.showerror("Access Denied", "Only the Master Admin can permanently delete invoices from the Recycle Bin.", parent=pop)
+        # --- THE FIX: Bedrock Security Check (Checks index 3 for Role + Master Admin ID 1) ---
+        active_uid = getattr(view.winfo_toplevel(), "current_user_id", None) or getattr(database, "ACTIVE_USER_ID", 1)
+        u_data = database.get_user_by_id(active_uid) if active_uid else None
+        real_role = u_data[3] if u_data and len(u_data) > 3 else getattr(view.winfo_toplevel(), "current_role", "Admin")
+        
+        if str(active_uid) != "1" and real_role != "Admin":
+            messagebox.showerror("Security Block", "Backend verification failed. Your profile is not authorized for permanent deletion.", parent=pop)
             return
+        # --------------------------------------------------------------------
+        
         if messagebox.askyesno("Confirm", "Permanently clear this invoice? This action cannot be undone.", parent=pop):
             inv_r, _ = database.get_invoice_by_id(inv_id)
             database.hard_delete_invoice(inv_id)

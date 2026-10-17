@@ -547,7 +547,7 @@ def open_new_invoice(view, edit_inv_id=None, clone_id=None):
             state.cust_var.set(inv[4])
             
             if hasattr(state, 'lookup_customer_cb'):
-                state.lookup_customer_cb(inv[4])
+                state.lookup_customer_cb(inv[4], getattr(state, 'cust_id', None))
             
             unpack_place_data(inv[5], state)
             
