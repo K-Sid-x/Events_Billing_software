@@ -79,10 +79,7 @@ def open_partial_import_popup(home_view, filepath):
     tk.Label(pop, text="Which company should this data be injected into?", font=("Arial", 9), bg=t["card"], fg=t["sec"]).pack(anchor="w", padx=30, pady=(0, 20))
 
     companies = database.get_all_companies()
-    # --- THE FIX: Make the label mathematically unique to prevent Dictionary Overwrites! ---
-    comp_dict = {f"{c[1]} (ID: {c[0]})": c[0] for c in companies}
-    comp_names = list(comp_dict.keys())
-    # -------------------------------------------------------------------------------------
+    comp_names = [f"{c[1]} (ID: {c[0]})" for c in companies]
 
     combo_var = tk.StringVar()
     cb = ttk.Combobox(pop, textvariable=combo_var, values=comp_names, state="readonly", font=("Arial", 11), width=40)
@@ -91,7 +88,8 @@ def open_partial_import_popup(home_view, filepath):
 
     def confirm_merge():
         if not combo_var.get(): return
-        target_id = comp_dict[combo_var.get()]
+        try: target_id = int(combo_var.get().split("(ID: ")[-1].replace(")", ""))
+        except: return
         
         def do_merge():
             try:
@@ -122,10 +120,8 @@ def open_export_popup(home_view):
     companies = database.get_all_companies()
     if not companies: return
 
-    # --- THE FIX: Apply the same unique naming convention to the export dropdown! ---
-    comp_dict = {f"{c[1]} (ID: {c[0]})": c[0] for c in companies}
-    comp_names = list(comp_dict.keys())
-    # --------------------------------------------------------------------------------
+    comp_names = [f"{c[1]} (ID: {c[0]})" for c in companies]
+    
     combo_var = tk.StringVar()
     cb = ttk.Combobox(pop, textvariable=combo_var, values=comp_names, state="readonly", font=("Arial", 11), width=35)
     cb.pack(anchor="w", padx=30, pady=(0, 20))
@@ -137,6 +133,7 @@ def open_export_popup(home_view):
         ("Company Profile & Settings", tk.BooleanVar(value=True)), 
         ("Customers & Clients", tk.BooleanVar(value=True)), 
         ("Employees & Payroll", tk.BooleanVar(value=True)), 
+        ("Labours & Daily Wages", tk.BooleanVar(value=True)),
         ("Inventory & Stock", tk.BooleanVar(value=True)), 
         ("Invoices & Billing", tk.BooleanVar(value=True)),
         ("Purchases & Vendor Bills", tk.BooleanVar(value=True)),
@@ -144,10 +141,11 @@ def open_export_popup(home_view):
     ]
     
     for text, var in opts:
-        tk.Checkbutton(pop, text=text, variable=var, bg=t["card"], fg=t["text"], selectcolor=t["bg"], activebackground=t["card"], activeforeground=t["text"], font=("Arial", 11), cursor="hand2").pack(anchor="w", padx=40, pady=5)
+        tk.Checkbutton(pop, text=text, variable=var, bg=t["card"], fg=t["text"], selectcolor=t["bg"], activebackground=t["card"], activeforeground=t["text"], font=("Arial", 11), cursor="hand2").pack(anchor="w", padx=40, pady=4)
 
     def confirm_export():
-        target_id = comp_dict[combo_var.get()]
+        try: target_id = int(combo_var.get().split("(ID: ")[-1].replace(")", ""))
+        except: return
         
         def do_export():
             filepath = filedialog.asksaveasfilename(parent=pop, title="Save Export File", defaultextension=".billx", filetypes=[("BillX Backup", "*.billx")])
@@ -155,9 +153,9 @@ def open_export_popup(home_view):
                 try:
                     selections = {
                         "settings": opts[0][1].get(), "customers": opts[1][1].get(), 
-                        "employees": opts[2][1].get(), "inventory": opts[3][1].get(), 
-                        "invoices": opts[4][1].get(), "purchases": opts[5][1].get(),
-                        "expenses": opts[6][1].get()
+                        "employees": opts[2][1].get(), "labours": opts[3][1].get(),
+                        "inventory": opts[4][1].get(), "invoices": opts[5][1].get(),
+                        "purchases": opts[6][1].get(), "expenses": opts[7][1].get()
                     }
                     data_transfer.export_company_data(filepath, target_id, selections)
                     messagebox.showinfo("Success", f"Data exported successfully to:\n{filepath}", parent=pop)

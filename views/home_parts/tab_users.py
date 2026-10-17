@@ -56,7 +56,10 @@ def open_user_form_popup(parent_win, theme, on_save_callback, edit_user_id=None)
     is_edit = edit_user_id is not None
     user_data = database.get_user_by_id(edit_user_id) if is_edit else None
     viewer_role = getattr(parent_win.winfo_toplevel(), "current_role", "Admin")
-    is_master_admin = (is_edit and str(edit_user_id) == "1") or (viewer_role != "Admin")
+    
+    # --- THE FIX: Eradicate the Privilege Escalation Bug ---
+    is_master_admin = (is_edit and str(edit_user_id) == "1")
+    # -------------------------------------------------------
 
     card_bg = theme.get("card", theme.get("bg", "#1e293b"))
     bg_col = theme.get("bg", "#0f172a")
@@ -1098,6 +1101,11 @@ def open_user_form_popup(parent_win, theme, on_save_callback, edit_user_id=None)
         # --- THE FIX: Ensure latest context dropdown changes are saved in the dictionary natively ---
         if not is_master_admin:
             save_sidebar_context(previous_ctx[0])
+            
+        # --- THE FIX: Prune Ghost Rules (Data Hoarder Bug) ---
+        clean_comp_sidebars = {str(k): v for k, v in comp_sidebars.items() if int(k) in selected_comps}
+        # -----------------------------------------------------
+            
         global_sidebars = saved_perms.get("sidebars", "all")
 
         if not is_master_admin and all_companies and not selected_comps:
@@ -1142,7 +1150,9 @@ def open_user_form_popup(parent_win, theme, on_save_callback, edit_user_id=None)
         perms_dict = saved_perms if (viewer_role != "Admin" and is_edit) else {
             "companies": "all" if (is_edit and str(edit_user_id) == "1") else selected_comps,
             "sidebars": "all" if (is_edit and str(edit_user_id) == "1") else global_sidebars,
-            "company_sidebars": {} if (is_edit and str(edit_user_id) == "1") else comp_sidebars,
+            # --- THE FIX: Inject the clean, pruned sidebar rules! ---
+            "company_sidebars": {} if (is_edit and str(edit_user_id) == "1") else clean_comp_sidebars,
+            # --------------------------------------------------------
             "invoice_rules": {} if (is_edit and str(edit_user_id) == "1") else {
                 "same_day_only": bool(inv_same_day_var.get() == 1),
                 "max_past_edits": clean_max_past_edits,
@@ -1169,6 +1179,7 @@ def open_user_form_popup(parent_win, theme, on_save_callback, edit_user_id=None)
                 "limit_edits": bool(purch_limit_edits_var.get() == 1),
                 "max_edits": clean_purch_max_edits,
                 "block_delete": bool(purch_block_del_var.get() == 1),
+                "lock_past_payments": bool(inv_lock_past_pay_var.get() == 1),
                 "hide_financials": bool(purch_hide_financials_var.get() == 1)
             },
             "catalog_rules": {} if (is_edit and str(edit_user_id) == "1") else {

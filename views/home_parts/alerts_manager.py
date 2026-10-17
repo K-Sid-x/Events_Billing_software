@@ -20,6 +20,7 @@ class AlertsManager:
             return 
 
         if self.window and self.window.winfo_exists():
+            self.last_close = now
             self.window.destroy()
             return
 
@@ -29,14 +30,18 @@ class AlertsManager:
             import database
             perms = database.get_user_permissions(uid)
             allowed_comps = perms.get("companies", "all")
-            allowed_tabs = perms.get("sidebars", "all")
+            global_tabs = perms.get("sidebars", "all")
+            comp_sidebars = perms.get("company_sidebars", {}) if isinstance(perms.get("company_sidebars"), dict) else {}
             allowed_comp_set = {int(x) for x in allowed_comps} if isinstance(allowed_comps, list) else None
 
-            self.alerts_data = [
-                a for a in raw_alerts
-                if (allowed_comp_set is None or int(a.get("cid", 0)) in allowed_comp_set)
-                and (allowed_tabs == "all" or a.get("target_tab") in allowed_tabs)
-            ]
+            def _is_alert_allowed(a):
+                cid_val = int(a.get("cid", 0))
+                if allowed_comp_set is not None and cid_val not in allowed_comp_set:
+                    return False
+                tabs_for_comp = comp_sidebars.get(str(cid_val), global_tabs)
+                return tabs_for_comp == "all" or a.get("target_tab") in tabs_for_comp
+
+            self.alerts_data = [a for a in raw_alerts if _is_alert_allowed(a)]
         else:
             self.alerts_data = raw_alerts
 
@@ -62,6 +67,7 @@ class AlertsManager:
             bx, by = btn_bell.master.winfo_rootx(), btn_bell.master.winfo_rooty()
             bw, bh = btn_bell.master.winfo_width(), btn_bell.master.winfo_height()
             if bx <= mx <= bx + bw and by <= my <= by + bh: return 
+            self.last_close = time.time()
             self.window.destroy()
             
         self.window.bind("<FocusOut>", on_focus_out)

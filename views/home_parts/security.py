@@ -46,7 +46,6 @@ def prompt_company_pin(home_view, cid, correct_pin, action="login", target_tab="
                 # -------------------------------------------------------------
             elif action == "edit":
                 from views.home_parts.company_forms import open_edit_popup
-                home_view.app.active_company_id = cid
                 open_edit_popup(home_view, cid)
             elif action == "delete":
                 home_view._execute_delete(cid)

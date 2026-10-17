@@ -269,7 +269,7 @@ class CompanyGridManager:
             messagebox.showerror("Access Denied", "Only the Master Admin can edit company details.", parent=self.home)
             return
         if comp_pin: prompt_company_pin(self.home, comp_id, comp_pin, action="edit")
-        else: self.app.active_company_id = comp_id; open_edit_popup(self.home, comp_id)
+        else: open_edit_popup(self.home, comp_id)
 
     def delete_company(self, comp_id, comp_pin):
         if getattr(self.app, "current_role", "") != "Admin":
@@ -299,4 +299,8 @@ class CompanyGridManager:
             database.delete_company(comp_id)
             if hasattr(self.app, "active_company_id") and str(self.app.active_company_id) == str(comp_id): 
                 self.app.active_company_id = None
+                if hasattr(self.app, "sidebar") and self.app.sidebar:
+                    self.app.sidebar.pack_forget()
+                if hasattr(self.app, "page_separator") and self.app.page_separator:
+                    self.app.page_separator.pack_forget()
             self.load_companies()
