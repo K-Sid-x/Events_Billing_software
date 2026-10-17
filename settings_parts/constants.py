@@ -7,16 +7,17 @@ RAW_FONTS = {
     "subj_label": 10, "subj_val": 10,
     "th_slno": 10, "th_part": 10, "th_hsn": 10, "th_qty": 10, "th_rate": 10, "th_days": 10, "th_amt": 10,
     "tr_slno": 10, "tr_part": 10, "tr_hsn": 10, "tr_qty": 10, "tr_rate": 10, "tr_days": 10, "tr_amt": 10,
-    "terms": 10, "bank": 10, "amt_words": 10,
-    "totals": 10, "signature": 10
+    "terms_lbl": 10, "terms_val": 10, "bank_lbl": 10, "bank_val": 10, "amt_words_lbl": 10, "amt_words_val": 10,
+    "totals": 10, "signature": 10, "page_no": 10, "esign_lbl": 10
 }
 
 # --- DEFAULT BOLD FIELDS ---
 BOLD_DEFAULTS = [
     "name", "doc_title", "bill_title", "bill_prefix", "bill_name", "bill_gst", 
-    "serv_title", "serv_prefix", "serv_name", "inv_no_lbl", "inv_dt_lbl", 
+    "serv_title", "serv_prefix", "inv_no_lbl", "inv_dt_lbl", 
     "eway_lbl", "subj_label", "th_slno", "th_part", "th_hsn", "th_qty", 
-    "th_rate", "th_days", "th_amt", "totals", "signature"
+    "th_rate", "th_days", "th_amt", "terms_lbl", "bank_lbl", "amt_words_lbl",
+    "totals", "signature", "esign_lbl"
 ]
 
 # --- DEFAULT UNDERLINE FIELDS ---

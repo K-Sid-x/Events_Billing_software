@@ -25,10 +25,7 @@ def draw_footer(ctx, f_y, page_count, y_off_final):
 
     def safe_fc(val, curr_fmt):
         actual_fmt = get_actual_fmt(curr_fmt)
-        res = format_currency(val, actual_fmt)
-        if len(res) >= 3 and res[-3] == ",":
-            res = res[:-3] + "." + res[-2:]
-        return res
+        return format_currency(val, actual_fmt)
 
     has_gst = getattr(sv, 'has_gst', True)
 
@@ -74,7 +71,47 @@ def draw_footer(ctx, f_y, page_count, y_off_final):
 
     left_y = f_y + s(5)
     left_y = c_txt(x_off + pad, left_y, "Amount in Words:", "amt_words_lbl")
-    c_txt(x_off + pad, left_y + s(2), words_val, "amt_words_val", width=amt_col_w)
+    left_y = c_txt(x_off + pad, left_y + s(2), words_val, "amt_words_val", width=amt_col_w)
+
+    if show_bank_toggle:
+        left_y += s(8)
+        ctx["cvs"].create_line(x_off + pad, left_y, x_off + pad + term_col_w, left_y, fill="#000000")
+        left_y += s(8)
+        qr_top_y = left_y
+        left_y = c_txt(x_off + pad, left_y, "Bank Details:", "bank_lbl")
+
+        bank_data = None
+        if hasattr(sv, 'banks_list') and sv.banks_list:
+            for b in sv.banks_list:
+                if b.get("is_default"):
+                    bank_data = b
+                    break
+            if not bank_data:
+                bank_data = sv.banks_list[0]
+
+        bank_str = "(Add a bank account in settings configuration layout profile)"
+        qr_path = ""
+        if bank_data:
+            bank_str = f"Bank: {bank_data.get('name', '')}\nA/C Name: {bank_data.get('ac_name') or c_name}\nA/C No: {bank_data.get('ac', '')}\nIFSC: {bank_data.get('ifsc', '')}\nBranch: {bank_data.get('branch', '')}"
+            if bank_data.get('pan'):
+                bank_str += f"\nPAN: {bank_data.get('pan', '')}"
+            qr_path = bank_data.get("qr_path", "")
+
+        has_qr = bool(qr_path and os.path.exists(qr_path))
+        text_w = term_col_w - s(110) if has_qr else term_col_w
+        left_y = c_txt(x_off + pad, left_y + s(2), bank_str, "bank_val", width=text_w)
+
+        if has_qr:
+            try:
+                from PIL import Image, ImageTk
+                img = Image.open(qr_path)
+                resample_filter = Image.Resampling.LANCZOS if hasattr(Image, 'Resampling') else Image.ANTIALIAS
+                qr_size = s(110)
+                img = img.resize((qr_size, qr_size), resample_filter)
+                sv.invoice_qr_preview_img = ImageTk.PhotoImage(img)
+                ctx["cvs"].create_image(x_off + pad + term_col_w - s(5), qr_top_y, image=sv.invoice_qr_preview_img, anchor="ne")
+            except Exception:
+                pass
     
     tx = x_off + paper_w - pad
     lbl_x = tx - s(120)
@@ -218,63 +255,12 @@ def draw_footer(ctx, f_y, page_count, y_off_final):
     tag_bot_left = "footer_bot_left"
     curr_y = -5000
     drawn_bot_left = False
-    
-    if show_bank_toggle or show_terms_toggle:
-        ctx["cvs"].create_line(x_off + pad, curr_y, x_off + pad + term_col_w, curr_y, fill="#000000", tags=(tag_bot_left,))
-        curr_y += s(8)
-        
-    if show_bank_toggle:
-        qr_top_y = curr_y 
-        curr_y = c_txt(x_off + pad, curr_y, "Bank Details:", "bank_lbl", tags=(tag_bot_left,))
-        
-        bank_data = None
-        if hasattr(sv, 'banks_list') and sv.banks_list:
-            for b in sv.banks_list:
-                if b.get("is_default"): 
-                    bank_data = b
-                    break
-            if not bank_data: bank_data = sv.banks_list[0]
-            
-        bank_str = "(Add a bank account in settings configuration layout profile)"
-        qr_path = ""
-        
-        qr_path = ""
-        if bank_data:
-            bank_str = f"Bank: {bank_data.get('name', '')}\nA/C Name: {bank_data.get('ac_name', c_name)}\nA/C No: {bank_data.get('ac', '')}\nIFSC: {bank_data.get('ifsc', '')}\nBranch: {bank_data.get('branch', '')}"
-            if bank_data.get('pan'): bank_str += f"\nPAN: {bank_data.get('pan', '')}"
-            qr_path = bank_data.get("qr_path", "")
-            
-        has_qr = bool(qr_path and os.path.exists(qr_path))
-        
-        # --- THE FIX: Hard-squeeze the text boundary by 100 pixels ---
-        text_w = term_col_w - s(110) if has_qr else term_col_w
-        curr_y = c_txt(x_off + pad, curr_y + s(2), bank_str, "bank_val", width=text_w, tags=(tag_bot_left,))
-        
-        if has_qr:
-            try:
-                from PIL import Image, ImageTk
-                img = Image.open(qr_path)
-                resample_filter = Image.Resampling.LANCZOS if hasattr(Image, 'Resampling') else Image.ANTIALIAS
-                
-                # --- THE FIX: Lock the QR size to exactly 85px ---
-                qr_size = s(110)
-                # -------------------------------------------------
-                
-                img = img.resize((qr_size, qr_size), resample_filter)
-                sv.invoice_qr_preview_img = ImageTk.PhotoImage(img) 
-                ctx["cvs"].create_image(x_off + pad + term_col_w - s(5), qr_top_y, image=sv.invoice_qr_preview_img, anchor="ne", tags=(tag_bot_left,))
-            except Exception as e:
-                pass
-                
-        curr_y += s(10)
-        drawn_bot_left = True
         
     if show_terms_toggle:
         valid_terms = [t.get().strip() for t in sv.terms_vars if t.get().strip()]
         if valid_terms:
-            if show_bank_toggle:
-                ctx["cvs"].create_line(x_off + pad, curr_y, x_off + pad + term_col_w, curr_y, fill="#000000", tags=(tag_bot_left,))
-                curr_y += s(8)
+            ctx["cvs"].create_line(x_off + pad, curr_y, x_off + pad + term_col_w, curr_y, fill="#000000", tags=(tag_bot_left,))
+            curr_y += s(8)
             curr_y = c_txt(x_off + pad, curr_y, "Terms & Conditions:", "terms_lbl", tags=(tag_bot_left,))
             curr_y += s(4)
             

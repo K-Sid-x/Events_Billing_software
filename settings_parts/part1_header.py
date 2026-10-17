@@ -55,7 +55,7 @@ def build_part_1(parent, sv):
     f_layout.pack(fill="x", pady=5)
 
     tk.Label(f_layout, text="Paper Size:", bg=CARD_BG, fg=TEXT_SECONDARY).grid(row=0, column=0, sticky="w", pady=4)
-    cb_paper = ttk.Combobox(f_layout, textvariable=sv.paper_size_var, values=["A4 (210*297mm)", "A5 (148*210mm)"], state="readonly", width=30)
+    cb_paper = ttk.Combobox(f_layout, textvariable=sv.paper_size_var, values=["A4 (210*297mm)", "Letter (216*279mm)", "Tabloid (279*432mm)", "Legal (216*356mm)", "A5 (148*210mm)"], state="readonly", width=30)
     cb_paper.grid(row=0, column=1, sticky="w", padx=10, pady=4)
 
     tk.Label(f_layout, text="Layout Style:", bg=CARD_BG, fg=TEXT_SECONDARY).grid(row=1, column=0, sticky="w", pady=4)

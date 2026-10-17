@@ -16,12 +16,16 @@ def render_preview(sv):
         sv.cvs.after(100, lambda: render_preview(sv))
         return 
     
-    # THE FIX: Reverted to strict logical dimensions.
+    # THE FIX: Support all 5 logical paper dimensions in Settings Live Preview
     paper_size = sv.paper_size_var.get() if hasattr(sv, 'paper_size_var') else "A4"
-    if "A5" in paper_size:
-        base_w, base_h = 559, 794
-    else:
-        base_w, base_h = 794, 1123
+    sizes_map = {
+        "A4 (210*297mm)": (794, 1123),
+        "Letter (216*279mm)": (816, 1054),
+        "Tabloid (279*432mm)": (1054, 1633),
+        "Legal (216*356mm)": (816, 1346),
+        "A5 (148*210mm)": (559, 794)
+    }
+    base_w, base_h = sizes_map.get(paper_size, (559, 794) if "A5" in paper_size else (794, 1123))
         
     sf = 1.0 
     
@@ -151,7 +155,7 @@ def render_preview(sv):
     if sv.layout_var.get() != "Custom (Drag & Drop)":
         cy = draw_meta(ctx, cy)
     else:
-        cy = cy + s(50)
+        cy = draw_meta(ctx, cy + s(50))
 
     f_y, page_count, y_off_final = draw_table(ctx, cy)
     draw_footer(ctx, f_y, page_count, y_off_final)

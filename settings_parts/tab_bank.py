@@ -113,12 +113,8 @@ def build_bank_tab(parent, sv):
     comp_id_val = getattr(sv, "comp_id", 1)
     try:
         import json
-        conn = database.get_connection()
-        c = conn.cursor()
-        c.execute("SELECT setting_value FROM ui_settings WHERE setting_key=?", (f"bank_tab_cols_{comp_id_val}",))
-        res = c.fetchone()
-        conn.close()
-        b_w = json.loads(res[0]) if res and res[0] else {}
+        raw_bw = database.get_ui_setting(f"bank_tab_cols_{comp_id_val}", "{}")
+        b_w = json.loads(raw_bw) if raw_bw else {}
     except:
         b_w = {}
 

@@ -30,10 +30,7 @@ def draw_table(ctx, cy):
 
     def safe_fc(val, curr_fmt):
         actual_fmt = get_actual_fmt(curr_fmt)
-        res = format_currency(val, actual_fmt)
-        if len(res) >= 3 and res[-3] == ",":
-            res = res[:-3] + "." + res[-2:]
-        return res
+        return format_currency(val, actual_fmt)
 
     is_split = ctx["is_split"]
     show_bank_toggle = ctx["show_bank_toggle"]

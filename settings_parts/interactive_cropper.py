@@ -165,16 +165,13 @@ class InteractiveCropper(tk.Toplevel):
         
         cropped = self.orig_img.crop((ox1, oy1, ox2, oy2))
         
-        # --- THE FIX: Stop the cropped logo from vanishing into the _internal void! ---
-        import sys
-        if getattr(sys, 'frozen', False):
-            base_dir = os.path.dirname(sys.executable)
-        else:
-            base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
-        
-        # We renamed the file slightly so the main.py Sweeper catches it perfectly!
-        save_path = os.path.join(base_dir, "cropped_temp_logo.png")
-        # ------------------------------------------------------------------------------
+        # --- THE FIX: Save cropped logos permanently per company inside company_logos ---
+        import time
+        comp_id = getattr(self.master, "comp_id", None) or getattr(database, "ACTIVE_COMPANY_ID", 1)
+        logo_dir = os.path.join(ROOT_DIR, "company_logos")
+        os.makedirs(logo_dir, exist_ok=True)
+        save_path = os.path.normpath(os.path.join(logo_dir, f"logo_cid_{comp_id}_{int(time.time()*1000)}.png"))
+        # --------------------------------------------------------------------------------
         
         cropped.save(save_path, "PNG")
         self.on_crop_done(save_path)

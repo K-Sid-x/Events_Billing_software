@@ -124,4 +124,4 @@ def draw_header(ctx, cy):
             
         return max_header_y + spacing, tk_logo
     else:
-        return t_y_start, tk_logo
+        return t_y_start + spacing, tk_logo

@@ -60,9 +60,12 @@ def build_config_tab(parent, sv):
 
     def restore_global_scroll(event=None):
         try:
-            sv.bind_all("<MouseWheel>", sv._on_mousewheel)
-            sv.bind_all("<Button-4>", sv._on_mousewheel)
-            sv.bind_all("<Button-5>", sv._on_mousewheel)
+            if sv.winfo_exists() and sv.winfo_ismapped():
+                sv.bind_all("<MouseWheel>", sv._on_mousewheel)
+                sv.bind_all("<Button-4>", sv._on_mousewheel)
+                sv.bind_all("<Button-5>", sv._on_mousewheel)
+            elif hasattr(sv, "app") and hasattr(sv.app, "_on_mousewheel"):
+                sv.app.bind_all("<MouseWheel>", sv.app._on_mousewheel)
         except: pass
 
     def on_tab_changed(event):
@@ -198,12 +201,8 @@ def build_config_tab(parent, sv):
     comp_id_val = getattr(sv, "comp_id", 1)
     try:
         import json
-        conn = database.get_connection()
-        c = conn.cursor()
-        c.execute("SELECT setting_value FROM ui_settings WHERE setting_key=?", (f"sig_tab_cols_{comp_id_val}",))
-        res = c.fetchone()
-        conn.close()
-        s_w = json.loads(res[0]) if res and res[0] else {}
+        raw_sw = database.get_ui_setting(f"sig_tab_cols_{comp_id_val}", "{}")
+        s_w = json.loads(raw_sw) if raw_sw else {}
     except:
         s_w = {}
 
