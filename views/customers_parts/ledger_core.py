@@ -120,14 +120,32 @@ def execute_ledger_load(ledger):
                 p_bill += r[3]; p_paid += r[4]; p_pend += r[5]
     except: pass
 
-    # --- THE FIX: Map TDS data across the entire Ledger! ---
-    c.execute("SELECT ref, amount FROM party_payments WHERE company_id=? AND party_id=? AND mode='TDS Deduction'", (ledger.comp_id, ledger.cust_db_id))
+    # --- THE FIX: Map Single & Bulk TDS data accurately across the entire Ledger! ---
+    def _parse_tds_str(raw_s):
+        s = re.sub(r'[^\d\.,]', '', str(raw_s or "")).strip()
+        if not s: return 0.0
+        if "," in s and "." in s:
+            s = s.replace(".", "").replace(",", ".") if s.rfind(",") > s.rfind(".") else s.replace(",", "")
+        elif "," in s:
+            s = s.replace(",", ".") if (len(s.split(",")) == 2 and len(s.split(",")[1]) <= 2) else s.replace(",", "")
+        try: return abs(float(s))
+        except: return 0.0
+
+    c.execute("SELECT ref, amount FROM party_payments WHERE company_id=? AND (party_id=? OR (party_id IS NULL AND party_name=?)) AND mode='TDS Deduction'", (ledger.comp_id, ledger.cust_db_id, ledger.party_name))
     tds_map = {}
     for ref_str, amt in c.fetchall():
         if ref_str:
-            bill_no = ref_str.split(" (")[0].strip()
-            tds_map[bill_no] = tds_map.get(bill_no, 0.0) + float(amt or 0.0)
-    # -------------------------------------------------------
+            parts = str(ref_str).split(" | ")
+            if len(parts) == 1:
+                bill_no = parts[0].split(" (")[0].strip()
+                tds_map[bill_no] = tds_map.get(bill_no, 0.0) + abs(float(amt or 0.0))
+            else:
+                for part in parts:
+                    bill_no = part.split(" (")[0].strip()
+                    m_amt = re.search(r'\((.*?)\)', part)
+                    part_val = _parse_tds_str(m_amt.group(1)) if m_amt else 0.0
+                    tds_map[bill_no] = tds_map.get(bill_no, 0.0) + part_val
+    # --------------------------------------------------------------------------------
     conn.close()
 
     s_idx, p_idx = 0, 0
@@ -299,9 +317,15 @@ def treeview_sort_column(tree, col, tree_type, ledger):
     
     def safe_convert(val):
         v_str = str(val).strip()
-        if col in ("amount", "balance"):
-            m = re.search(r'[-+]?\d*\.?\d+', v_str.replace(',', ''))
-            return float(m.group()) if m else 0.0
+        if col in ("amount", "tds", "balance"):
+            s = re.sub(r'[^\d\.,-]', '', v_str).strip()
+            if not s or s == "-": return 0.0
+            if "," in s and "." in s:
+                s = s.replace(".", "").replace(",", ".") if s.rfind(",") > s.rfind(".") else s.replace(",", "")
+            elif "," in s:
+                s = s.replace(",", ".") if (len(s.split(",")) == 2 and len(s.split(",")[1]) <= 2) else s.replace(",", "")
+            try: return float(s)
+            except: return 0.0
         elif col == "date":
             for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%Y", "%m/%d/%Y", ledger.date_fmt_code):
                 try: return datetime.strptime(v_str, fmt).timestamp()
@@ -364,13 +388,13 @@ def process_history_action(ledger, action, is_undo=True):
     table = "invoices" if action["pay_type"] == "receive" else "purchases"
     
     c.execute(f"PRAGMA table_info({table})")
-    has_woff = "written_off" in [col[1] for col in c.fetchall()]
+    has_woff = "write_off" in [col[1] for col in c.fetchall()]
     
     for item in action["invoices_changed"]:
         if has_woff and len(item) > 4:
             inv_id, prev_paid, prev_due, prev_status, prev_woff = item
-            # --- THE FIX: Added company_id locks to Undo/Redo Engine ---
-            c.execute(f"UPDATE {table} SET amount_paid=?, balance_due=?, status=?, written_off=? WHERE id=? AND company_id=?", (prev_paid, prev_due, prev_status, prev_woff, inv_id, ledger.comp_id))
+            # --- THE FIX: Added company_id locks & fixed write_off column name ---
+            c.execute(f"UPDATE {table} SET amount_paid=?, balance_due=?, status=?, write_off=? WHERE id=? AND company_id=?", (prev_paid, prev_due, prev_status, prev_woff, inv_id, ledger.comp_id))
         else:
             inv_id, prev_paid, prev_due, prev_status = item[0], item[1], item[2], item[3]
             c.execute(f"UPDATE {table} SET amount_paid=?, balance_due=?, status=? WHERE id=? AND company_id=?", (prev_paid, prev_due, prev_status, inv_id, ledger.comp_id))
@@ -416,14 +440,14 @@ def undo_last_payment(ledger):
         redo_action["purch_changes"] = []
 
         c.execute("PRAGMA table_info(invoices)")
-        has_woff_inv = "written_off" in [col[1] for col in c.fetchall()]
+        has_woff_inv = "write_off" in [col[1] for col in c.fetchall()]
         for item in action["inv_changes"]:
             inv_id = item[0]
             if has_woff_inv:
-                c.execute("SELECT amount_paid, balance_due, status, written_off FROM invoices WHERE id=?", (inv_id,))
+                c.execute("SELECT amount_paid, balance_due, status, write_off FROM invoices WHERE id=?", (inv_id,))
                 r = c.fetchone()
                 redo_action["inv_changes"].append((inv_id, r[0], r[1], r[2], r[3]))
-                c.execute("UPDATE invoices SET amount_paid=?, balance_due=?, status=?, written_off=? WHERE id=? AND company_id=?", (item[1], item[2], item[3], item[4], inv_id, ledger.comp_id))
+                c.execute("UPDATE invoices SET amount_paid=?, balance_due=?, status=?, write_off=? WHERE id=? AND company_id=?", (item[1], item[2], item[3], item[4], inv_id, ledger.comp_id))
             else:
                 c.execute("SELECT amount_paid, balance_due, status FROM invoices WHERE id=?", (inv_id,))
                 r = c.fetchone()
@@ -431,14 +455,14 @@ def undo_last_payment(ledger):
                 c.execute("UPDATE invoices SET amount_paid=?, balance_due=?, status=? WHERE id=? AND company_id=?", (item[1], item[2], item[3], inv_id, ledger.comp_id))
 
         c.execute("PRAGMA table_info(purchases)")
-        has_woff_purch = "written_off" in [col[1] for col in c.fetchall()]
+        has_woff_purch = "write_off" in [col[1] for col in c.fetchall()]
         for item in action["purch_changes"]:
             purch_id = item[0]
             if has_woff_purch:
-                c.execute("SELECT amount_paid, balance_due, status, written_off FROM purchases WHERE id=?", (purch_id,))
+                c.execute("SELECT amount_paid, balance_due, status, write_off FROM purchases WHERE id=?", (purch_id,))
                 r = c.fetchone()
                 redo_action["purch_changes"].append((purch_id, r[0], r[1], r[2], r[3]))
-                c.execute("UPDATE purchases SET amount_paid=?, balance_due=?, status=?, written_off=? WHERE id=? AND company_id=?", (item[1], item[2], item[3], item[4], purch_id, ledger.comp_id))
+                c.execute("UPDATE purchases SET amount_paid=?, balance_due=?, status=?, write_off=? WHERE id=? AND company_id=?", (item[1], item[2], item[3], item[4], purch_id, ledger.comp_id))
             else:
                 c.execute("SELECT amount_paid, balance_due, status FROM purchases WHERE id=?", (purch_id,))
                 r = c.fetchone()
@@ -483,11 +507,11 @@ def undo_last_payment(ledger):
     table = "invoices" if action["pay_type"] == "receive" else "purchases"
     
     c.execute(f"PRAGMA table_info({table})")
-    has_woff = "written_off" in [col[1] for col in c.fetchall()]
+    has_woff = "write_off" in [col[1] for col in c.fetchall()]
     
     for item in action["invoices_changed"]:
         if has_woff:
-            c.execute(f"SELECT amount_paid, balance_due, status, written_off FROM {table} WHERE id=?", (item[0],))
+            c.execute(f"SELECT amount_paid, balance_due, status, write_off FROM {table} WHERE id=?", (item[0],))
             r = c.fetchone()
             redo_action["invoices_changed"].append((item[0], r[0], r[1], r[2], r[3]))
         else:
@@ -528,14 +552,14 @@ def redo_last_payment(ledger):
         undo_action["purch_changes"] = []
 
         c.execute("PRAGMA table_info(invoices)")
-        has_woff_inv = "written_off" in [col[1] for col in c.fetchall()]
+        has_woff_inv = "write_off" in [col[1] for col in c.fetchall()]
         for item in action["inv_changes"]:
             inv_id = item[0]
             if has_woff_inv:
-                c.execute("SELECT amount_paid, balance_due, status, written_off FROM invoices WHERE id=?", (inv_id,))
+                c.execute("SELECT amount_paid, balance_due, status, write_off FROM invoices WHERE id=?", (inv_id,))
                 r = c.fetchone()
                 undo_action["inv_changes"].append((inv_id, r[0], r[1], r[2], r[3]))
-                c.execute("UPDATE invoices SET amount_paid=?, balance_due=?, status=?, written_off=? WHERE id=? AND company_id=?", (item[1], item[2], item[3], item[4], inv_id, ledger.comp_id))
+                c.execute("UPDATE invoices SET amount_paid=?, balance_due=?, status=?, write_off=? WHERE id=? AND company_id=?", (item[1], item[2], item[3], item[4], inv_id, ledger.comp_id))
             else:
                 c.execute("SELECT amount_paid, balance_due, status FROM invoices WHERE id=?", (inv_id,))
                 r = c.fetchone()
@@ -543,14 +567,14 @@ def redo_last_payment(ledger):
                 c.execute("UPDATE invoices SET amount_paid=?, balance_due=?, status=? WHERE id=? AND company_id=?", (item[1], item[2], item[3], inv_id, ledger.comp_id))
 
         c.execute("PRAGMA table_info(purchases)")
-        has_woff_purch = "written_off" in [col[1] for col in c.fetchall()]
+        has_woff_purch = "write_off" in [col[1] for col in c.fetchall()]
         for item in action["purch_changes"]:
             purch_id = item[0]
             if has_woff_purch:
-                c.execute("SELECT amount_paid, balance_due, status, written_off FROM purchases WHERE id=?", (purch_id,))
+                c.execute("SELECT amount_paid, balance_due, status, write_off FROM purchases WHERE id=?", (purch_id,))
                 r = c.fetchone()
                 undo_action["purch_changes"].append((purch_id, r[0], r[1], r[2], r[3]))
-                c.execute("UPDATE purchases SET amount_paid=?, balance_due=?, status=?, written_off=? WHERE id=? AND company_id=?", (item[1], item[2], item[3], item[4], purch_id, ledger.comp_id))
+                c.execute("UPDATE purchases SET amount_paid=?, balance_due=?, status=?, write_off=? WHERE id=? AND company_id=?", (item[1], item[2], item[3], item[4], purch_id, ledger.comp_id))
             else:
                 c.execute("SELECT amount_paid, balance_due, status FROM purchases WHERE id=?", (purch_id,))
                 r = c.fetchone()
@@ -613,11 +637,11 @@ def redo_last_payment(ledger):
     table = "invoices" if action["pay_type"] == "receive" else "purchases"
     
     c.execute(f"PRAGMA table_info({table})")
-    has_woff = "written_off" in [col[1] for col in c.fetchall()]
+    has_woff = "write_off" in [col[1] for col in c.fetchall()]
     
     for item in action["invoices_changed"]:
         if has_woff:
-            c.execute(f"SELECT amount_paid, balance_due, status, written_off FROM {table} WHERE id=?", (item[0],))
+            c.execute(f"SELECT amount_paid, balance_due, status, write_off FROM {table} WHERE id=?", (item[0],))
             r = c.fetchone()
             undo_action["invoices_changed"].append((item[0], r[0], r[1], r[2], r[3]))
         else:

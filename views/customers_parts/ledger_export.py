@@ -19,11 +19,13 @@ def export_ledger_statement(ledger):
         if '\n' in txt: return txt.split('\n')[-1]
         return txt
     
-    # --- THE FIX: Advance Wallet added to the PDF summary safely ---
+    # --- THE FIX: Both Advance Wallets (In & Out) added to the PDF summary safely ---
     try:
-        adv_text = get_val(ledger.lbl_adv)
+        adv_in_txt = get_val(ledger.lbl_adv_in)
+        adv_out_txt = get_val(ledger.lbl_adv_out)
+        adv_text = f"{adv_in_txt} &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp; {adv_out_txt}"
     except:
-        adv_text = "Advance Wallet: 0.00"
+        adv_text = f"Advance (In): {ledger.fmt(getattr(ledger, 'advance_in', 0.0))} &nbsp;&nbsp;&nbsp;|&nbsp;&nbsp;&nbsp; Advance (Out): {ledger.fmt(getattr(ledger, 'advance_out', 0.0))}"
     
     html = f"""
     <html><head><meta charset="utf-8"><style>

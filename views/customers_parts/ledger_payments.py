@@ -27,9 +27,9 @@ def open_payment_popup(ledger, pay_type="receive"):
     c = conn.cursor()
     
     if pay_type == "receive":
-        c.execute("SELECT id, invoice_number, balance_due, invoice_date, subtotal FROM invoices WHERE customer_name=? AND company_id=? AND balance_due > 0 AND is_deleted=0 AND status != 'Draft' ORDER BY invoice_date ASC", (ledger.party_name, ledger.comp_id))
+        c.execute("SELECT id, invoice_number, balance_due, invoice_date, subtotal, place_of_service FROM invoices WHERE (customer_id=? OR (customer_id IS NULL AND customer_name=?)) AND company_id=? AND balance_due > 0 AND is_deleted=0 AND status != 'Draft' ORDER BY invoice_date ASC", (ledger.cust_db_id, ledger.party_name, ledger.comp_id))
     else:
-        c.execute("SELECT id, bill_number, balance_due, purchase_date, subtotal FROM purchases WHERE vendor_name=? AND company_id=? AND balance_due > 0 AND is_deleted=0 AND is_draft=0 ORDER BY purchase_date ASC", (ledger.party_name, ledger.comp_id))
+        c.execute("SELECT id, bill_number, balance_due, purchase_date, subtotal FROM purchases WHERE (vendor_id=? OR (vendor_id IS NULL AND vendor_name=?)) AND company_id=? AND balance_due > 0 AND is_deleted=0 AND is_draft=0 ORDER BY purchase_date ASC", (ledger.cust_db_id, ledger.party_name, ledger.comp_id))
         
     raw_unpaid_bills = c.fetchall()
     
@@ -38,6 +38,24 @@ def open_payment_popup(ledger, pay_type="receive"):
     for r in raw_unpaid_bills:
         unpaid_bills.append(r)
         sub_val = float(r[4] or 0.0) if len(r) > 4 else float(r[2] or 0.0)
+        
+        # --- THE FIX: Extract Discount from Invoices to get True Taxable Subtotal ---
+        if pay_type == "receive" and len(r) > 5:
+            place_str = str(r[5] or "")
+            disc_amt = 0.0
+            if "@@DISC@@" in place_str:
+                m_disc = re.search(r'@@DISC@@(.*?)@@', place_str + "@@")
+                if m_disc:
+                    d_parts = m_disc.group(1).split('||')
+                    if len(d_parts) > 0 and str(d_parts[0]).strip() == "1":
+                        try: d_val = float(d_parts[1].strip() or 0.0)
+                        except: d_val = 0.0
+                        d_typ = d_parts[2].strip() if len(d_parts) > 2 else "%"
+                        if "%" in d_typ: disc_amt = sub_val * (d_val / 100.0)
+                        else: disc_amt = d_val
+            sub_val = max(0.0, sub_val - disc_amt)
+        # ----------------------------------------------------------------------------
+            
         raw_subtotals[str(r[0])] = sub_val
         
     conn.close()
@@ -460,7 +478,6 @@ def open_payment_popup(ledger, pay_type="receive"):
         sel = apply_var.get()
         action_chk.grid_forget()
         adv_info_lbl.grid_forget()
-        action_var.set(0)
         
         if "Refund" in sel or "No Pending Actions" in sel:
             tds_f.grid_forget()
@@ -561,6 +578,7 @@ def open_payment_popup(ledger, pay_type="receive"):
 
     # --- THE MISSING FIX: Force the UI to listen to your keyboard! ---
     p_amt_var.trace_add("write", check_amount)
+    action_var.trace_add("write", lambda *a: check_amount() if apply_var.get() != "Selective Bulk Allocation" else recalculate())
     update_ui_layout()
 
     def safe_update_advance(cursor, cust_db_id, amount_change, pocket):
@@ -639,7 +657,11 @@ def open_payment_popup(ledger, pay_type="receive"):
         if r_path and os.path.exists(r_path):
             from views.invoice_parts.helpers import get_vault_path
             folder_name = "purchase_payment_receipts" if pay_type == "make" else "invoice_payment_receipts"
-            safe_dir = get_vault_path(ROOT_DIR, ledger.comp_id, ledger.party_name, folder_name, ledger.cust_db_id)
+            
+            try: dt = datetime.strptime(p_date_var.get(), ledger.date_fmt_code)
+            except: dt = datetime.now()
+            
+            safe_dir = get_vault_path(ROOT_DIR, ledger.comp_id, ledger.party_name, folder_name, ledger.cust_db_id, txn_date=dt)
             
             ext = os.path.splitext(r_path)[1] or ".png"
             
@@ -661,7 +683,7 @@ def open_payment_popup(ledger, pay_type="receive"):
         table = "invoices" if pay_type == "receive" else "purchases"
         c.execute(f"PRAGMA table_info({table})")
         
-        has_woff = "written_off" in [col[1] for col in c.fetchall()]
+        has_woff = "write_off" in [col[1] for col in c.fetchall()]
         notes_text = p_notes_var.get().strip()
         
         action_log = {
@@ -736,9 +758,9 @@ def open_payment_popup(ledger, pay_type="receive"):
                             actual_applied += alloc_cash
                             actual_tds += alloc_tds
                             total_write_off += alloc_woff
-                            if alloc_cash > 0: breakdown_text.append(f"Opening Balance ({ledger.fmt(alloc_cash)})")
-                            if alloc_tds > 0: breakdown_tds.append(f"Opening Balance ({ledger.fmt(alloc_tds)})")
-                            if alloc_woff > 0: breakdown_woff.append(f"Opening Balance ({ledger.fmt(alloc_woff)})")
+                            if alloc_cash > 0: breakdown_text.append(f"Opening Balance ({alloc_cash:.2f})")
+                            if alloc_tds > 0: breakdown_tds.append(f"Opening Balance ({alloc_tds:.2f})")
+                            if alloc_woff > 0: breakdown_woff.append(f"Opening Balance ({alloc_woff:.2f})")
                         else:
                             inv_id = int(t_id)
                             inv_num = t[1]
@@ -749,7 +771,7 @@ def open_payment_popup(ledger, pay_type="receive"):
                             
                             curr_woff = 0.0
                             if has_woff:
-                                c.execute(f"SELECT written_off FROM {table} WHERE id=? AND company_id=?", (inv_id, ledger.comp_id))
+                                c.execute(f"SELECT write_off FROM {table} WHERE id=? AND company_id=?", (inv_id, ledger.comp_id))
                                 curr_woff = c.fetchone()[0] or 0.0
 
                             action_log["invoices_changed"].append((inv_id, curr_paid, curr_due, curr_status, curr_woff)) 
@@ -757,18 +779,20 @@ def open_payment_popup(ledger, pay_type="receive"):
                             new_paid = (curr_paid or 0) + alloc_cash + alloc_tds
                             new_woff = curr_woff + alloc_woff
                             new_due = max(0, curr_due - (alloc_cash + alloc_tds + alloc_woff))
-                            new_status = "Paid" if new_due <= 0.01 else "Partial"
                             
-                            if has_woff: c.execute(f"UPDATE {table} SET amount_paid=?, balance_due=?, status=?, written_off=? WHERE id=? AND company_id=?", (new_paid, new_due, new_status, new_woff, inv_id, ledger.comp_id))
+                            is_fully_covered = (new_due <= 0.01) or ((alloc_cash + alloc_tds + alloc_woff) >= curr_due - 0.01)
+                            new_status = "Paid" if is_fully_covered else "Partial"
+                            
+                            if has_woff: c.execute(f"UPDATE {table} SET amount_paid=?, balance_due=?, status=?, write_off=? WHERE id=? AND company_id=?", (new_paid, new_due, new_status, new_woff, inv_id, ledger.comp_id))
                             else: c.execute(f"UPDATE {table} SET amount_paid=?, balance_due=?, status=? WHERE id=? AND company_id=?", (new_paid, new_due, new_status, inv_id, ledger.comp_id))
                             
                             actual_applied += alloc_cash
                             actual_tds += alloc_tds
                             total_write_off += alloc_woff
                             
-                            if alloc_cash > 0: breakdown_text.append(f"{inv_num} ({ledger.fmt(alloc_cash)})")
-                            if alloc_tds > 0: breakdown_tds.append(f"{inv_num} ({ledger.fmt(alloc_tds)})")
-                            if alloc_woff > 0: breakdown_woff.append(f"{inv_num} ({ledger.fmt(alloc_woff)})")
+                            if alloc_cash > 0: breakdown_text.append(f"{inv_num} ({alloc_cash:.2f})")
+                            if alloc_tds > 0: breakdown_tds.append(f"{inv_num} ({alloc_tds:.2f})")
+                            if alloc_woff > 0: breakdown_woff.append(f"{inv_num} ({alloc_woff:.2f})")
                 
                 remaining_funds = 0.0 # Handled by the helper math
             else:
@@ -781,12 +805,16 @@ def open_payment_popup(ledger, pay_type="receive"):
                 if "Opening Balance" in sel_apply:
                     ob_paid_now = actual_applied + actual_tds
                     if actual_applied > 0:
-                        breakdown_text.append(f"Opening Balance ({ledger.fmt(actual_applied)})")
+                        breakdown_text.append(f"Opening Balance ({actual_applied:.2f})")
+                    if actual_tds > 0:
+                        breakdown_tds.append(f"Opening Balance ({actual_tds:.2f})")
                     
                     if action_var.get() == 1:
                         write_off_amt = ob_due - (actual_applied + actual_tds)
                         ob_paid_now += write_off_amt
                         total_write_off = write_off_amt
+                        if total_write_off > 0:
+                            breakdown_woff.append(f"Opening Balance ({total_write_off:.2f})")
                 else:
                     inv_id, inv_num, due = unpaid_bills[sel_idx][0], unpaid_bills[sel_idx][1], unpaid_bills[sel_idx][2]
                     pay_this = actual_applied
@@ -797,7 +825,7 @@ def open_payment_popup(ledger, pay_type="receive"):
                     
                     curr_woff = 0.0
                     if has_woff:
-                        c.execute(f"SELECT written_off FROM {table} WHERE id=? AND company_id=?", (inv_id, ledger.comp_id))
+                        c.execute(f"SELECT write_off FROM {table} WHERE id=? AND company_id=?", (inv_id, ledger.comp_id))
                         curr_woff = c.fetchone()[0] or 0.0
                         
                     action_log["invoices_changed"].append((inv_id, curr_paid, curr_due, curr_status, curr_woff)) 
@@ -808,16 +836,21 @@ def open_payment_popup(ledger, pay_type="receive"):
                         
                     new_paid = (curr_paid or 0) + pay_this + actual_tds
                     new_due = max(0, curr_due - (pay_this + actual_tds + write_off_amt))
-                    new_status = "Paid" if new_due <= 0.01 else "Partial"
+                    
+                    is_fully_covered = (new_due <= 0.01) or ((pay_this + actual_tds + write_off_amt) >= curr_due - 0.01)
+                    new_status = "Paid" if is_fully_covered else "Partial"
                     new_woff = curr_woff + write_off_amt
                     total_write_off = write_off_amt
                     
-                    if has_woff: c.execute(f"UPDATE {table} SET amount_paid=?, balance_due=?, status=?, written_off=? WHERE id=? AND company_id=?", (new_paid, new_due, new_status, new_woff, inv_id, ledger.comp_id))
+                    if has_woff: c.execute(f"UPDATE {table} SET amount_paid=?, balance_due=?, status=?, write_off=? WHERE id=? AND company_id=?", (new_paid, new_due, new_status, new_woff, inv_id, ledger.comp_id))
                     else: c.execute(f"UPDATE {table} SET amount_paid=?, balance_due=?, status=? WHERE id=? AND company_id=?", (new_paid, new_due, new_status, inv_id, ledger.comp_id))
                     
                     if pay_this > 0:
-                        ref_entry = f"{inv_num} ({ledger.fmt(pay_this)})"
-                        breakdown_text.append(ref_entry)
+                        breakdown_text.append(f"{inv_num} ({pay_this:.2f})")
+                    if actual_tds > 0:
+                        breakdown_tds.append(f"{inv_num} ({actual_tds:.2f})")
+                    if total_write_off > 0:
+                        breakdown_woff.append(f"{inv_num} ({total_write_off:.2f})")
 
             pocket = "advance_in" if pay_type == "receive" else "advance_out"
 
@@ -834,12 +867,10 @@ def open_payment_popup(ledger, pay_type="receive"):
                 safe_update_advance(c, ledger.cust_db_id, adv_change, pocket)
 
             final_ref_string = " | ".join(breakdown_text)
-            if total_write_off > 0:
-                final_ref_string += f" (+ {ledger.fmt(total_write_off)} Write-Off)"
-
+            
             amt_sign = -1 if pay_type == "make" else 1
                 
-            # --- THE FIX: Inject party_id and TDS records into the database ---
+            # --- THE FIX: Create clean, separate logs for Cash, TDS, and Write-Offs! ---
             if actual_applied > 0:
                 action_log["history_rows"].append((actual_applied * amt_sign, clean_mode, final_ref_string, notes_text or "Selected Payment", final_attach))
                 c.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes, attachment_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -847,11 +878,18 @@ def open_payment_popup(ledger, pay_type="receive"):
                 action_log["pay_ids"].append(c.lastrowid)
                 
             if actual_tds > 0:
-                tds_ref_str = f"Opening Balance ({ledger.fmt(actual_tds)})" if "Opening Balance" in sel_apply else f"{inv_num} ({ledger.fmt(actual_tds)})"
+                tds_ref_str = " | ".join(breakdown_tds)
                 tds_lbl_note = "TDS Deducted by Customer" if pay_type == "receive" else "TDS Deducted from Vendor"
                 action_log["history_rows"].append((actual_tds * amt_sign, "TDS Deduction", tds_ref_str, tds_lbl_note, ""))
                 c.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes, attachment_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                           (ledger.comp_id, ledger.party_name, ledger.cust_db_id, pay_type, p_date_var.get(), actual_tds * amt_sign, "TDS Deduction", tds_ref_str, tds_lbl_note, ""))
+                action_log["pay_ids"].append(c.lastrowid)
+                
+            if total_write_off > 0:
+                woff_ref_str = " | ".join(breakdown_woff)
+                action_log["history_rows"].append((total_write_off * amt_sign, "Write-Off", woff_ref_str, "Balance Waived (Write-Off)", ""))
+                c.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes, attachment_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                          (ledger.comp_id, ledger.party_name, ledger.cust_db_id, pay_type, p_date_var.get(), total_write_off * amt_sign, "Write-Off", woff_ref_str, "Balance Waived (Write-Off)", ""))
                 action_log["pay_ids"].append(c.lastrowid)
                 
             if remaining_funds > 0 and not is_wallet:
@@ -860,7 +898,7 @@ def open_payment_popup(ledger, pay_type="receive"):
                 c.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes, attachment_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                           (ledger.comp_id, ledger.party_name, ledger.cust_db_id, pay_type, p_date_var.get(), remaining_funds * amt_sign, clean_mode, adv_lbl, "Overpayment added to wallet credit.", final_attach))
                 action_log["pay_ids"].append(c.lastrowid)
-            # -------------------------------------------------------------------------
+            # ---------------------------------------------------------------------------
 
             audit_act = "Payment In" if pay_type == "receive" else "Payment Out"
             det_parts = [f"Mode: {clean_mode}"]
@@ -868,6 +906,8 @@ def open_payment_popup(ledger, pay_type="receive"):
                 det_parts.append(f"Applied: {final_ref_string}")
             if actual_tds > 0:
                 det_parts.append(f"TDS: @@CURR:{actual_tds}@@")
+            if total_write_off > 0:
+                det_parts.append(f"Write-Off: @@CURR:{total_write_off}@@")
             if remaining_funds > 0 and not is_wallet:
                 det_parts.append(f"To Advance Wallet: @@CURR:{remaining_funds}@@")
             if notes_text:
@@ -1115,7 +1155,11 @@ def view_payment_history(ledger):
                             from views.invoice_parts.helpers import get_vault_path
                             p_type_label = row_vals[1]
                             folder_name = "purchase_payment_receipts" if "Paid" in p_type_label else "invoice_payment_receipts"
-                            safe_dir = get_vault_path(ROOT_DIR, ledger.comp_id, ledger.party_name, folder_name, ledger.cust_db_id)
+                            
+                            try: dt = datetime.strptime(row_vals[0], ledger.date_fmt_code)
+                            except: dt = datetime.now()
+                            
+                            safe_dir = get_vault_path(ROOT_DIR, ledger.comp_id, ledger.party_name, folder_name, ledger.cust_db_id, txn_date=dt)
                             
                             import re
                             ext = os.path.splitext(path)[1] or ".png"
@@ -1236,7 +1280,7 @@ def view_payment_history(ledger):
             try: c.execute("ALTER TABLE party_payments ADD COLUMN attachment_path TEXT")
             except: pass
             
-            c.execute("SELECT id, pay_date, pay_type, mode, ref, amount, notes, attachment_path FROM party_payments WHERE company_id=? AND party_name=? ORDER BY id DESC", (ledger.comp_id, ledger.party_name))
+            c.execute("SELECT id, pay_date, pay_type, mode, ref, amount, notes, attachment_path FROM party_payments WHERE company_id=? AND (party_id=? OR (party_id IS NULL AND party_name=?)) ORDER BY id DESC", (ledger.comp_id, ledger.cust_db_id, ledger.party_name))
             idx = 0
             for r in c.fetchall():
                 log_id = r[0]
@@ -1325,9 +1369,9 @@ def view_payment_history(ledger):
 def open_contra_settlement_popup(ledger):
     conn = database.get_connection()
     c = conn.cursor()
-    c.execute("SELECT id, invoice_number, balance_due, invoice_date FROM invoices WHERE customer_name=? AND company_id=? AND balance_due > 0 AND is_deleted=0 AND status != 'Draft' ORDER BY invoice_date ASC", (ledger.party_name, ledger.comp_id))
+    c.execute("SELECT id, invoice_number, balance_due, invoice_date FROM invoices WHERE (customer_id=? OR (customer_id IS NULL AND customer_name=?)) AND company_id=? AND balance_due > 0 AND is_deleted=0 AND status != 'Draft' ORDER BY invoice_date ASC", (ledger.cust_db_id, ledger.party_name, ledger.comp_id))
     unpaid_invs = c.fetchall()
-    c.execute("SELECT id, bill_number, balance_due, purchase_date FROM purchases WHERE vendor_name=? AND company_id=? AND balance_due > 0 AND is_deleted=0 AND is_draft=0 ORDER BY purchase_date ASC", (ledger.party_name, ledger.comp_id))
+    c.execute("SELECT id, bill_number, balance_due, purchase_date FROM purchases WHERE (vendor_id=? OR (vendor_id IS NULL AND vendor_name=?)) AND company_id=? AND balance_due > 0 AND is_deleted=0 AND is_draft=0 ORDER BY purchase_date ASC", (ledger.cust_db_id, ledger.party_name, ledger.comp_id))
     unpaid_purchs = c.fetchall()
     conn.close()
 
@@ -1483,9 +1527,9 @@ def open_contra_settlement_popup(ledger):
         c = conn.cursor()
 
         c.execute("PRAGMA table_info(invoices)")
-        has_woff_inv = "written_off" in [col[1] for col in c.fetchall()]
+        has_woff_inv = "write_off" in [col[1] for col in c.fetchall()]
         c.execute("PRAGMA table_info(purchases)")
-        has_woff_purch = "written_off" in [col[1] for col in c.fetchall()]
+        has_woff_purch = "write_off" in [col[1] for col in c.fetchall()]
 
         action_log = {"pay_type": "contra", "inv_changes": [], "purch_changes": [], "pay_ids": [], "history_rows": [], "offset_amt": offset_amt}
 
@@ -1505,7 +1549,7 @@ def open_contra_settlement_popup(ledger):
             curr_woff = 0.0
             
             if has_woff_inv:
-                c.execute("SELECT written_off FROM invoices WHERE id=? AND company_id=?", (inv_id_int, ledger.comp_id))
+                c.execute("SELECT write_off FROM invoices WHERE id=? AND company_id=?", (inv_id_int, ledger.comp_id))
                 curr_woff = c.fetchone()[0] or 0.0
             
             action_log["inv_changes"].append((inv_id_int, curr_paid, curr_due, curr_status, curr_woff))
@@ -1514,11 +1558,11 @@ def open_contra_settlement_popup(ledger):
             new_due = max(0, curr_due - apply_amt)
             new_status = "Paid" if new_due <= 0.01 else "Partial"
 
-            if has_woff_inv: c.execute("UPDATE invoices SET amount_paid=?, balance_due=?, status=?, written_off=? WHERE id=? AND company_id=?", (new_paid, new_due, new_status, curr_woff, inv_id_int, ledger.comp_id))
+            if has_woff_inv: c.execute("UPDATE invoices SET amount_paid=?, balance_due=?, status=?, write_off=? WHERE id=? AND company_id=?", (new_paid, new_due, new_status, curr_woff, inv_id_int, ledger.comp_id))
             else: c.execute("UPDATE invoices SET amount_paid=?, balance_due=?, status=? WHERE id=? AND company_id=?", (new_paid, new_due, new_status, inv_id_int, ledger.comp_id))
 
             rem_inv_offset -= apply_amt
-            inv_ref_parts.append(f"{t[1]} ({ledger.fmt(apply_amt)})")
+            inv_ref_parts.append(f"{t[1]} ({apply_amt:.2f})")
 
         # 2. Process Purchases (Make side)
         rem_purch_offset = offset_amt
@@ -1536,7 +1580,7 @@ def open_contra_settlement_popup(ledger):
             curr_woff = 0.0
             
             if has_woff_purch:
-                c.execute("SELECT written_off FROM purchases WHERE id=? AND company_id=?", (purch_id_int, ledger.comp_id))
+                c.execute("SELECT write_off FROM purchases WHERE id=? AND company_id=?", (purch_id_int, ledger.comp_id))
                 curr_woff = c.fetchone()[0] or 0.0
             
             action_log["purch_changes"].append((purch_id_int, curr_paid, curr_due, curr_status, curr_woff))
@@ -1545,11 +1589,11 @@ def open_contra_settlement_popup(ledger):
             new_due = max(0, curr_due - apply_amt)
             new_status = "Paid" if new_due <= 0.01 else "Partial"
 
-            if has_woff_purch: c.execute("UPDATE purchases SET amount_paid=?, balance_due=?, status=?, written_off=? WHERE id=? AND company_id=?", (new_paid, new_due, new_status, curr_woff, purch_id_int, ledger.comp_id))
+            if has_woff_purch: c.execute("UPDATE purchases SET amount_paid=?, balance_due=?, status=?, write_off=? WHERE id=? AND company_id=?", (new_paid, new_due, new_status, curr_woff, purch_id_int, ledger.comp_id))
             else: c.execute("UPDATE purchases SET amount_paid=?, balance_due=?, status=? WHERE id=? AND company_id=?", (new_paid, new_due, new_status, purch_id_int, ledger.comp_id))
 
             rem_purch_offset -= apply_amt
-            purch_ref_parts.append(f"{t[1]} ({ledger.fmt(apply_amt)})")
+            purch_ref_parts.append(f"{t[1]} ({apply_amt:.2f})")
 
         # 3. Create Logs
         pay_date = d_var.get()
@@ -1562,11 +1606,11 @@ def open_contra_settlement_popup(ledger):
         action_log["pay_ids"].append(c.lastrowid)
         action_log["history_rows"].append(("receive", pay_date, offset_amt, mode, " | ".join(inv_ref_parts), notes))
 
-        # Make Log (Purchases)
+        # Make Log (Purchases) — Stored as negative so Payment History colors it Red (-)
         c.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes, attachment_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                  (ledger.comp_id, ledger.party_name, ledger.cust_db_id, "make", pay_date, offset_amt, mode, " | ".join(purch_ref_parts), notes, ""))
+                  (ledger.comp_id, ledger.party_name, ledger.cust_db_id, "make", pay_date, -offset_amt, mode, " | ".join(purch_ref_parts), notes, ""))
         action_log["pay_ids"].append(c.lastrowid)
-        action_log["history_rows"].append(("make", pay_date, offset_amt, mode, " | ".join(purch_ref_parts), notes))
+        action_log["history_rows"].append(("make", pay_date, -offset_amt, mode, " | ".join(purch_ref_parts), notes))
 
         conn.commit()
         conn.close()

@@ -70,7 +70,8 @@ class LedgerWindow(tk.Toplevel):
         self.email_str = str(c_data[4]) if c_data[4] and c_data[4] != "None" else ""
         raw_addr = str(c_data[5]) if len(c_data) > 5 and c_data[5] else ""
         
-        self.addr_text, self.pan_text, self.state_text = "N/A", "N/A", ""
+        saved_col_state = str(c_data[6]).strip() if len(c_data) > 6 and c_data[6] and str(c_data[6]) != "None" else ""
+        self.addr_text, self.pan_text, self.state_text = "N/A", "N/A", saved_col_state
         self.ob_val, self.ob_type = 0.0, "They Owe You (Dr)"
         self.advance_in = 0.0
         self.advance_out = 0.0
@@ -80,6 +81,8 @@ class LedgerWindow(tk.Toplevel):
                 j = json.loads(raw_addr)
                 self.addr_text = j.get("address", "N/A") or "N/A"
                 self.pan_text = j.get("pan", "N/A") or "N/A"
+                if not self.state_text:
+                    self.state_text = str(j.get("state", "") or "").strip()
                 self.ob_val = float(j.get("opening_balance", 0.0))
                 self.ob_type = j.get("ob_type", "They Owe You (Dr)")
                 
@@ -94,10 +97,12 @@ class LedgerWindow(tk.Toplevel):
             self.is_gst_company = (comp_data[8] == 1) if comp_data and len(comp_data) > 8 else False
         except: self.is_gst_company = False
 
-        if self.is_gst_company and self.gstin_str and len(self.gstin_str) >= 2:
-            st_code = self.gstin_str[:2]
-            if st_code in GST_STATE_CODES:
-                self.state_text = GST_STATE_CODES[st_code]
+        if self.is_gst_company:
+            if self.gstin_str and len(self.gstin_str) >= 2:
+                st_code = self.gstin_str[:2]
+                if st_code in GST_STATE_CODES:
+                    self.state_text = GST_STATE_CODES[st_code]
+            if self.state_text:
                 state_name_only = self.state_text.split(',')[0].strip() 
                 self.addr_text = re.sub(r'\b' + re.escape(state_name_only) + r'\b', '', self.addr_text, flags=re.IGNORECASE)
                 self.addr_text = self.addr_text.replace(', ,', ',').replace(' ,', ',').replace('( )', '').replace('()', '').strip(', ')

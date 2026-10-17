@@ -380,11 +380,6 @@ def open_form(customers_view, cust_id=None):
             if c_data and len(c_data) > 5 and c_data[5]:
                 try: existing_data = json.loads(c_data[5])
                 except: pass
-        else:
-            c_data = database.get_customer_by_name(name)
-            if c_data and len(c_data) > 5 and c_data[5]:
-                try: existing_data = json.loads(c_data[5])
-                except: pass
 
         if cust_id and is_ob_locked:
             ob_val = float(existing_data.get("opening_balance", _init_ob) or 0.0)
