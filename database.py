@@ -25,9 +25,13 @@ def set_active_user(user_id):
     ACTIVE_USER_ID = int(user_id) if user_id else 1
 
 def get_connection(): 
-    conn = sqlite3.connect(DB_PATH)
+    # --- THE FIX: Enable WAL mode and 30s timeout to eradicate 'database is locked' errors ---
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    try: conn.execute("PRAGMA journal_mode=WAL")
+    except Exception: pass
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+    # ----------------------------------------------------------------------------------------
 
 def init_db():
     conn = get_connection(); cursor = conn.cursor()
@@ -236,12 +240,16 @@ def init_db():
 
     # --- THE FIX: Auto-Heal Historical Payment Vocabulary & Fix Inverted Sales Advances ---
     try:
+        # 1. Flip legacy inverted client advances BEFORE renaming the reference label
+        cursor.execute("UPDATE party_payments SET pay_type = 'receive' WHERE ref = 'Advance Credit (In)' AND pay_type = 'make'")
+        cursor.execute("UPDATE party_payments SET pay_type = 'make' WHERE ref = 'Refunded to Customer' AND pay_type = 'receive'")
+        
+        # 2. Standardize legacy reference labels
         cursor.execute("UPDATE party_payments SET ref = 'Advance Wallet' WHERE ref IN ('Advance Credit (In)', 'Advance Debit (Out)')")
         cursor.execute("UPDATE party_payments SET ref = 'Refunded from Vendor' WHERE ref = 'Refunded from Supplier'")
         
-        # Flips Sales Advances from 'make' back to 'receive', and Sales Refunds from 'receive' back to 'make'
-        cursor.execute("UPDATE party_payments SET pay_type = 'receive' WHERE ref = 'Advance Wallet' AND pay_type = 'make' AND party_id IN (SELECT id FROM customers)")
-        cursor.execute("UPDATE party_payments SET pay_type = 'make' WHERE ref = 'Refunded to Customer' AND pay_type = 'receive' AND party_id IN (SELECT id FROM customers)")
+        # 3. Heal any Vendor Advances (negative amounts / purchase notes) that were mistakenly flipped to 'receive'
+        cursor.execute("UPDATE party_payments SET pay_type = 'make' WHERE ref LIKE '%Advance Wallet%' AND pay_type = 'receive' AND (amount < 0 OR notes LIKE '%Advance Paid%' OR notes LIKE '%Bill #%')")
     except: pass
 
     # --- THE FIX: Option B Database Overhaul & Auto-Migration (Heals Existing Data) ---
@@ -305,6 +313,22 @@ def init_db():
         pass
     # ----------------------------------------------------------------------------------
 
+    # --- THE FIX: High-Performance Database Indexes ---
+    try:
+        index_queries = [
+            "CREATE INDEX IF NOT EXISTS idx_purchases_comp_date ON purchases(company_id, purchase_date)",
+            "CREATE INDEX IF NOT EXISTS idx_purchases_vendor ON purchases(company_id, vendor_id)",
+            "CREATE INDEX IF NOT EXISTS idx_invoices_comp_date ON invoices(company_id, invoice_date)",
+            "CREATE INDEX IF NOT EXISTS idx_invoices_customer ON invoices(company_id, customer_id)",
+            "CREATE INDEX IF NOT EXISTS idx_party_payments_ref ON party_payments(company_id, ref)",
+            "CREATE INDEX IF NOT EXISTS idx_stock_item ON stock(company_id, item_name)"
+        ]
+        for q in index_queries:
+            cursor.execute(q)
+    except Exception:
+        pass
+    # --------------------------------------------------
+
     conn.commit(); conn.close()
 
 def add_labour(name, phone, address, blood_type, role, photo_path, doc_path, profile_type="Individual", daily_rate=0.0, skilled_rate=0.0, unskilled_rate=0.0, emergency_contact="", worker_id_str="", dob=""):
@@ -353,7 +377,7 @@ def delete_labour(labour_id):
 def restore_deleted_labour(labour_id):
     conn = get_connection(); c = conn.cursor()
     c.execute("UPDATE labours SET is_deleted=0 WHERE id=? AND company_id=?", (labour_id, ACTIVE_COMPANY_ID))
-    conn.commit(); c.close()
+    conn.commit(); conn.close()
 
 def get_all_labour_id_strings():
     conn = get_connection(); c = conn.cursor()
@@ -578,7 +602,49 @@ def add_company(name, name_sec, address, phone, phone2, phone3, email, gst_toggl
     
 def update_company(company_id, name, name_sec, address, phone, phone2, phone3, email, gst_toggle, gstin, logo_path, layout, size, shape, template_json, security_pin=""):
     conn = get_connection(); cursor = conn.cursor()
+    cursor.execute("SELECT name FROM company WHERE id=?", (company_id,))
+    old_row = cursor.fetchone()
+    old_name = old_row[0] if old_row else None
+
     cursor.execute('UPDATE company SET name=?, name_secondary=?, address=?, phone=?, phone2=?, phone3=?, email=?, gst_toggle=?, gstin=?, logo_path=?, header_layout=?, logo_size=?, logo_shape=?, template_json=?, security_pin=? WHERE id=?', (name, name_sec, address, phone, phone2, phone3, email, gst_toggle, gstin, logo_path, layout, size, shape, template_json, security_pin, company_id))
+
+    if old_name and old_name != name:
+        try:
+            old_safe = re.sub(r'[\\/*?:"<>|]', "", old_name).strip()
+            new_safe = re.sub(r'[\\/*?:"<>|]', "", name).strip()
+            cursor.execute("SELECT COUNT(id) FROM company WHERE name=? AND id!=?", (old_name, company_id))
+            twin_count = cursor.fetchone()[0]
+
+            if old_safe and new_safe and old_safe != new_safe and twin_count == 0:
+                folders = ["Vault", "purchase_payment_receipts", "invoice_payment_receipts", "vendor_bills", "Employees", "Labours"]
+                for folder in folders:
+                    old_dir = os.path.join(BASE_DIR, folder, old_safe)
+                    new_dir = os.path.join(BASE_DIR, folder, new_safe)
+                    if os.path.exists(old_dir) and not os.path.exists(new_dir):
+                        try: os.rename(old_dir, new_dir)
+                        except Exception: pass
+
+                for tbl, col in [
+                    ("purchases", "receipt_path"),
+                    ("party_payments", "attachment_path"),
+                    ("general_expenses", "receipt_path"),
+                    ("employees", "photo_path"),
+                    ("employees", "document_path"),
+                    ("employees", "docs_json"),
+                    ("employee_payments", "attachment_path"),
+                    ("labours", "photo_path"),
+                    ("labours", "doc_path"),
+                    ("labour_ledger", "attachment_path"),
+                    ("inventory", "description")
+                ]:
+                    cursor.execute(f"SELECT id, {col} FROM {tbl} WHERE company_id=? AND {col} IS NOT NULL AND {col} != ''", (company_id,))
+                    for r_id, val_str in cursor.fetchall():
+                        new_val = val_str.replace(f"\\{old_safe}\\", f"\\{new_safe}\\").replace(f"/{old_safe}/", f"/{new_safe}/")
+                        if new_val != val_str:
+                            cursor.execute(f"UPDATE {tbl} SET {col}=? WHERE id=?", (new_val, r_id))
+        except Exception as e:
+            print(f"Company Folder Rename Error: {e}")
+
     conn.commit(); conn.close()
 
 def update_company_tax_profile(company_id, state, state_code, business_type):
@@ -621,7 +687,9 @@ def delete_company(company_id):
         # (These JSON files use company_id, so they never overlap and are always safe to delete)
         subj_cust = os.path.join(BASE_DIR, f"subject_custom_{company_id}.json")
         subj_bl = os.path.join(BASE_DIR, f"subject_blacklist_{company_id}.json")
-        for f in [subj_cust, subj_bl]:
+        place_cust = os.path.join(BASE_DIR, f"place_custom_{company_id}.json")
+        place_bl = os.path.join(BASE_DIR, f"place_blacklist_{company_id}.json")
+        for f in [subj_cust, subj_bl, place_cust, place_bl]:
             if os.path.exists(f): os.remove(f)
         # ---------------------------------------------------------------------------------------
     except: pass
@@ -633,7 +701,7 @@ def delete_company(company_id):
     cursor.execute('DELETE FROM labour_attendance WHERE labour_id IN (SELECT id FROM labours WHERE company_id = ?)', (company_id,))
     cursor.execute('DELETE FROM labour_ledger WHERE labour_id IN (SELECT id FROM labours WHERE company_id = ?)', (company_id,))
     
-    tables = ['customers', 'inventory', 'stock', 'invoices', 'purchases', 'employees', 'general_expenses', 'party_payments', 'labours', 'ui_settings', 'company']
+    tables = ['customers', 'inventory', 'stock', 'invoices', 'purchases', 'employees', 'general_expenses', 'party_payments', 'labours', 'ui_settings', 'audit_logs', 'company']
     for table in tables:
         cursor.execute(f'DELETE FROM {table} WHERE {"id" if table == "company" else "company_id"} = ?', (company_id,))
     
@@ -675,6 +743,34 @@ def update_customer(customer_id, name, alias, phone, gstin, email, address):
         cursor.execute('UPDATE purchases SET vendor_name=? WHERE vendor_id=? AND company_id=?', (name, customer_id, ACTIVE_COMPANY_ID))
         cursor.execute('UPDATE party_payments SET party_name=? WHERE party_id=? AND company_id=?', (name, customer_id, ACTIVE_COMPANY_ID))
         # ------------------------------------------------------------------------------------
+        
+        # --- THE FIX: Auto-Rename the Vault folder to match the new Customer Name! ---
+        try:
+            import os, re
+            cursor.execute('SELECT name FROM company WHERE id=?', (ACTIVE_COMPANY_ID,))
+            comp_row = cursor.fetchone()
+            comp_name = comp_row[0] if comp_row else f"Company_{ACTIVE_COMPANY_ID}"
+            safe_comp = re.sub(r'[\\/*?:"<>|]', "", comp_name).strip()
+            
+            base_vault = os.path.join(BASE_DIR, "Vault", safe_comp)
+            
+            old_safe_name = re.sub(r'[\\/*?:"<>|]', "", old_name).strip()
+            new_safe_name = re.sub(r'[\\/*?:"<>|]', "", name).strip()
+            
+            old_folder_path = os.path.join(base_vault, f"{old_safe_name}_ID_{customer_id}")
+            new_folder_path = os.path.join(base_vault, f"{new_safe_name}_ID_{customer_id}")
+            
+            # If the exact old folder exists, rename it. If not, fallback to sticky ID search
+            if os.path.exists(old_folder_path):
+                os.rename(old_folder_path, new_folder_path)
+            elif os.path.exists(base_vault):
+                for folder in os.listdir(base_vault):
+                    if folder.endswith(f"_ID_{customer_id}"):
+                        os.rename(os.path.join(base_vault, folder), new_folder_path)
+                        break
+        except Exception as e:
+            print(f"Vault Folder Rename Error: {e}")
+        # -----------------------------------------------------------------------------
         
     conn.commit(); conn.close()
 
@@ -933,13 +1029,15 @@ def get_deleted_invoices():
 
 def soft_delete_invoice(inv_id, refund_mode='none'):
     conn = get_connection(); cursor = conn.cursor(); cursor.execute('PRAGMA foreign_keys = ON')
-    cursor.execute('SELECT invoice_number, invoice_date, customer_name, amount_paid, total, status, customer_id FROM invoices WHERE id=? AND company_id=?', (inv_id, ACTIVE_COMPANY_ID))
+    cursor.execute('SELECT invoice_number, invoice_date, customer_name, amount_paid, total, status, customer_id, write_off FROM invoices WHERE id=? AND company_id=?', (inv_id, ACTIVE_COMPANY_ID))
     inv_row = cursor.fetchone()
+    stored_mode = refund_mode
     
     if inv_row:
         inv_num, inv_date, c_name = inv_row[0], inv_row[1], inv_row[2]
         amt_paid, tot, stat = float(inv_row[3] or 0.0), float(inv_row[4] or 0.0), inv_row[5]
         c_id = inv_row[6]
+        orig_woff = float(inv_row[7] or 0.0) if len(inv_row) > 7 else 0.0
         
         cursor.execute('SELECT template_json FROM company WHERE id=?', (ACTIVE_COMPANY_ID,))
         comp_row = cursor.fetchone()
@@ -958,7 +1056,6 @@ def soft_delete_invoice(inv_id, refund_mode='none'):
             except Exception: pass
 
         # --- THE FIX: Unified Master Deletion Engine for Invoice Soft-Deletes ---
-        # 1. Isolate only the pure Cash/Bank portions of the payment (Ignore Wallet Deductions)
         cursor.execute("SELECT mode, ref FROM party_payments WHERE company_id=? AND pay_type='receive' AND ref LIKE ?", (ACTIVE_COMPANY_ID, f"%{inv_num} (%"))
         total_cash_portion = 0.0
         for mode, ref_str in cursor.fetchall():
@@ -970,22 +1067,22 @@ def soft_delete_invoice(inv_id, refund_mode='none'):
                     try: total_cash_portion += float(re.sub(r'[^\d\.]', '', amt_str))
                     except: pass
 
-        # 2. Run all linked payments through the Master Deletion Engine (This perfectly refunds Wallet Deductions natively)
         cursor.execute("SELECT id FROM party_payments WHERE company_id=? AND pay_type='receive' AND ref LIKE ?", (ACTIVE_COMPANY_ID, f"%{inv_num} (%"))
         for pid_row in cursor.fetchall():
             delete_party_payment(pid_row[0], ACTIVE_COMPANY_ID, bypass_rules=True)
 
-        # 3. If "Move to Wallet" was selected, credit ONLY the cash portion to the Advance Wallet
-        if refund_mode == 'wallet' and total_cash_portion > 0.01:
-            note = f"System Reversal: Invoice #{inv_num} Soft-Deleted. Cash converted to Advance."
-            cursor.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes) VALUES (?, ?, ?, 'receive', ?, ?, 'System Reversal', 'Advance Wallet', ?)", 
-                           (ACTIVE_COMPANY_ID, c_name, c_id, inv_date, total_cash_portion, note))
-            internal_update_wallet(cursor, ACTIVE_COMPANY_ID, c_name, total_cash_portion, "advance_in", c_id)
+        if refund_mode == 'wallet':
+            stored_mode = f"wallet|{amt_paid}|{orig_woff}"
+            if total_cash_portion > 0.01:
+                note = f"System Reversal: Invoice #{inv_num} Soft-Deleted. Cash converted to Advance."
+                cursor.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes) VALUES (?, ?, ?, 'receive', ?, ?, 'System Reversal', 'Advance Wallet', ?)", 
+                               (ACTIVE_COMPANY_ID, c_name, c_id, inv_date, total_cash_portion, note))
+                internal_update_wallet(cursor, ACTIVE_COMPANY_ID, c_name, total_cash_portion, "advance_in", c_id)
             
         cursor.execute("UPDATE invoices SET amount_paid=0.0, balance_due=?, write_off=0.0, status='Unpaid' WHERE id=?", (tot, inv_id))
         # ------------------------------------------------------------------------
 
-    cursor.execute('UPDATE invoices SET is_deleted = 1, refund_mode = ? WHERE id = ? AND company_id = ?', (refund_mode, inv_id, ACTIVE_COMPANY_ID))
+    cursor.execute('UPDATE invoices SET is_deleted = 1, refund_mode = ? WHERE id = ? AND company_id = ?', (stored_mode, inv_id, ACTIVE_COMPANY_ID))
     conn.commit(); conn.close()
 
 def restore_invoice(inv_id):
@@ -997,7 +1094,7 @@ def restore_invoice(inv_id):
     if inv_row:
         inv_num, inv_date, c_name = inv_row[0], inv_row[1], inv_row[2]
         amt_paid, tot = float(inv_row[3] or 0.0), float(inv_row[4] or 0.0)
-        stat, refund_mode = inv_row[5], inv_row[6]
+        stat, refund_mode = inv_row[5], str(inv_row[6] or "none")
         woff = float(inv_row[7] or 0.0) if len(inv_row) > 7 else 0.0
         c_id = inv_row[8]
         
@@ -1017,18 +1114,30 @@ def restore_invoice(inv_id):
                         cursor.execute('INSERT INTO stock (company_id, item_name, quantity, unit, market_price, notes, added_date, transaction_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (ACTIVE_COMPANY_ID, item_name, qty, unit, rate, json.dumps(notes_dict), inv_date, 'LOSS'))
             except Exception: pass
         
-        if refund_mode == 'wallet':
+        if refund_mode.startswith('wallet'):
+            parts = refund_mode.split("|")
+            if len(parts) >= 3:
+                try: amt_paid = float(parts[1])
+                except: pass
+                try: woff = float(parts[2])
+                except: pass
+
             if amt_paid > 0:
-                note = f"System Reversal: Invoice #{inv_num} Restored. Cash deducted from Advance."
-                cursor.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes) VALUES (?, ?, ?, 'receive', ?, ?, 'System Reversal', 'Advance Wallet', ?)", 
-                               (ACTIVE_COMPANY_ID, c_name, c_id, inv_date, -amt_paid, note))
+                cursor.execute("DELETE FROM party_payments WHERE company_id=? AND mode='System Reversal' AND ref='Advance Wallet' AND notes LIKE ?", (ACTIVE_COMPANY_ID, f"%Invoice #{inv_num} Soft-Deleted%"))
                 internal_update_wallet(cursor, ACTIVE_COMPANY_ID, c_name, -amt_paid, "advance_in", c_id)
+                pay_ref = f"{inv_num} ({amt_paid})"
+                cursor.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes) VALUES (?, ?, ?, 'receive', ?, ?, 'Cash', ?, ?)", 
+                               (ACTIVE_COMPANY_ID, c_name, c_id, inv_date, amt_paid, pay_ref, "Restored Invoice Payment"))
             
             if woff > 0:
                 woff_ref = f"{inv_num} ({woff})"
                 note_woff = f"System Reversal: Invoice #{inv_num} Restored. Write-Off Re-applied."
-                cursor.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes) VALUES (?, ?, ?, 'receive', ?, ?, 'System Reversal', ?, ?)", 
+                cursor.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes) VALUES (?, ?, ?, 'receive', ?, ?, 'Write-Off', ?, ?)", 
                                (ACTIVE_COMPANY_ID, c_name, c_id, inv_date, woff, woff_ref, note_woff))
+
+            new_bal = max(0.0, tot - amt_paid - woff)
+            new_stat = 'Paid' if new_bal <= 0.01 else ('Partial' if (amt_paid > 0 or woff > 0) else 'Unpaid')
+            cursor.execute("UPDATE invoices SET amount_paid=?, balance_due=?, write_off=?, status=? WHERE id=? AND company_id=?", (amt_paid, new_bal, woff, new_stat, inv_id, ACTIVE_COMPANY_ID))
 
     cursor.execute('UPDATE invoices SET is_deleted = 0, refund_mode="none" WHERE id = ? AND company_id = ?', (inv_id, ACTIVE_COMPANY_ID))
     conn.commit(); conn.close()
@@ -1059,12 +1168,14 @@ def check_invoice_number_status(inv_num):
 
 def soft_delete_purchase(p_id, refund_mode='none'):
     conn = get_connection(); cursor = conn.cursor(); cursor.execute('PRAGMA foreign_keys = ON')
-    cursor.execute('SELECT bill_number, purchase_date, vendor_name, amount_paid, total, status, is_draft, vendor_id FROM purchases WHERE id=? AND company_id=?', (p_id, ACTIVE_COMPANY_ID))
+    cursor.execute('SELECT bill_number, purchase_date, vendor_name, amount_paid, total, status, is_draft, vendor_id, write_off FROM purchases WHERE id=? AND company_id=?', (p_id, ACTIVE_COMPANY_ID))
     p_row = cursor.fetchone()
+    stored_mode = refund_mode
     
     if p_row:
         b_num, p_date, v_name, amt_paid, tot, stat, is_draft = p_row[0], p_row[1], p_row[2], float(p_row[3] or 0.0), float(p_row[4] or 0.0), p_row[5], p_row[6]
         v_id = p_row[7]
+        orig_woff = float(p_row[8] or 0.0) if len(p_row) > 8 else 0.0
         
         if not is_draft:
             # --- THE FIX: Unified Master Deletion Engine for Purchase Soft-Deletes ---
@@ -1083,16 +1194,18 @@ def soft_delete_purchase(p_id, refund_mode='none'):
             for pid_row in cursor.fetchall():
                 delete_party_payment(pid_row[0], ACTIVE_COMPANY_ID, bypass_rules=True)
 
-            if refund_mode == 'wallet' and total_cash_portion > 0.01:
-                note = f"System Reversal: Bill #{b_num} Soft-Deleted. Cash converted to Advance."
-                cursor.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes) VALUES (?, ?, ?, 'make', ?, ?, 'System Reversal', 'Advance Wallet', ?)", 
-                               (ACTIVE_COMPANY_ID, v_name, v_id, p_date, -total_cash_portion, note))
-                internal_update_wallet(cursor, ACTIVE_COMPANY_ID, v_name, total_cash_portion, "advance_out", v_id)
+            if refund_mode == 'wallet':
+                stored_mode = f"wallet|{amt_paid}|{orig_woff}"
+                if total_cash_portion > 0.01:
+                    note = f"System Reversal: Bill #{b_num} Soft-Deleted. Cash converted to Advance."
+                    cursor.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes) VALUES (?, ?, ?, 'make', ?, ?, 'System Reversal', 'Advance Wallet', ?)", 
+                                   (ACTIVE_COMPANY_ID, v_name, v_id, p_date, -total_cash_portion, note))
+                    internal_update_wallet(cursor, ACTIVE_COMPANY_ID, v_name, total_cash_portion, "advance_out", v_id)
                 
             cursor.execute("UPDATE purchases SET amount_paid=0.0, balance_due=?, write_off=0.0, status='Unpaid' WHERE id=?", (tot, p_id))
             # ------------------------------------------------------------------------
 
-    cursor.execute('UPDATE purchases SET is_deleted = 1, refund_mode = ? WHERE id = ? AND company_id = ?', (refund_mode, p_id, ACTIVE_COMPANY_ID))
+    cursor.execute('UPDATE purchases SET is_deleted = 1, refund_mode = ? WHERE id = ? AND company_id = ?', (stored_mode, p_id, ACTIVE_COMPANY_ID))
     conn.commit(); conn.close()
 
 def restore_purchase(p_id):
@@ -1105,23 +1218,35 @@ def restore_purchase(p_id):
         b_num, p_date, v_name = p_row[0], p_row[1], p_row[2]
         amt_paid = float(p_row[3] or 0.0)
         tot = float(p_row[4] or 0.0)
-        stat, refund_mode, is_draft = p_row[5], p_row[6], p_row[7]
+        stat, refund_mode, is_draft = p_row[5], str(p_row[6] or "none"), p_row[7]
         woff = float(p_row[8] or 0.0)
         v_id = p_row[9]
         
         if not is_draft:
-            if refund_mode == 'wallet':
+            if refund_mode.startswith('wallet'):
+                parts = refund_mode.split("|")
+                if len(parts) >= 3:
+                    try: amt_paid = float(parts[1])
+                    except: pass
+                    try: woff = float(parts[2])
+                    except: pass
+
                 if amt_paid > 0:
-                    note = f"System Reversal: Bill #{b_num} Restored. Cash deducted from Advance."
-                    cursor.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes) VALUES (?, ?, ?, 'make', ?, ?, 'System Reversal', 'Advance Wallet', ?)", 
-                                   (ACTIVE_COMPANY_ID, v_name, v_id, p_date, amt_paid, note))
+                    cursor.execute("DELETE FROM party_payments WHERE company_id=? AND mode='System Reversal' AND ref='Advance Wallet' AND notes LIKE ?", (ACTIVE_COMPANY_ID, f"%Bill #{b_num} Soft-Deleted%"))
                     internal_update_wallet(cursor, ACTIVE_COMPANY_ID, v_name, -amt_paid, "advance_out", v_id)
+                    pay_ref = f"{b_num} ({amt_paid})"
+                    cursor.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes) VALUES (?, ?, ?, 'make', ?, ?, 'Cash', ?, ?)", 
+                                   (ACTIVE_COMPANY_ID, v_name, v_id, p_date, -amt_paid, pay_ref, "Restored Purchase Payment"))
                 
                 if woff > 0:
                     woff_ref = f"{b_num} ({woff})"
                     note_woff = f"System Reversal: Bill #{b_num} Restored. Write-Off Re-applied."
-                    cursor.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes) VALUES (?, ?, ?, 'make', ?, ?, 'System Reversal', ?, ?)", 
+                    cursor.execute("INSERT INTO party_payments (company_id, party_name, party_id, pay_type, pay_date, amount, mode, ref, notes) VALUES (?, ?, ?, 'make', ?, ?, 'Write-Off', ?, ?)", 
                                    (ACTIVE_COMPANY_ID, v_name, v_id, p_date, -woff, woff_ref, note_woff))
+
+                new_bal = max(0.0, tot - amt_paid - woff)
+                new_stat = 'Paid' if new_bal <= 0.01 else ('Partial' if (amt_paid > 0 or woff > 0) else 'Unpaid')
+                cursor.execute("UPDATE purchases SET amount_paid=?, balance_due=?, write_off=?, status=? WHERE id=? AND company_id=?", (amt_paid, new_bal, woff, new_stat, p_id, ACTIVE_COMPANY_ID))
             
     cursor.execute('UPDATE purchases SET is_deleted = 0, refund_mode="none" WHERE id = ? AND company_id = ?', (p_id, ACTIVE_COMPANY_ID))
     conn.commit(); conn.close()
@@ -1143,8 +1268,6 @@ def hard_delete_purchase(p_id):
         for pid_row in payment_ids:
             delete_party_payment(pid_row[0], ACTIVE_COMPANY_ID, bypass_rules=True)
             
-        # 2. Wipe Phantom General Expenses generated by Debit Notes/Returns
-        cursor.execute("DELETE FROM general_expenses WHERE company_id=? AND notes LIKE ?", (ACTIVE_COMPANY_ID, f'%\"source_id\": {p_id}%'))
     # -------------------------------------------------------------------------
     
     cursor.execute('DELETE FROM purchases WHERE id = ? AND company_id = ?', (p_id, ACTIVE_COMPANY_ID))
@@ -1202,8 +1325,8 @@ def get_balance_sheet_raw_data():
                 is_advance_wallet = "advance wallet" in ref_lower
                 is_offset = "offset wallet" in ref_lower
     
-                # Allow Offsets to bypass the system adjustment block
-                if p_mode_safe in ('Write-Off', 'Adjustment', 'System Adjustment') and not is_offset:
+                # Allow Offsets to bypass the system adjustment block, but block non-cash Contra settlements
+                if p_mode_safe in ('Write-Off', 'Adjustment', 'System Adjustment', 'Contra / Bill Offset') and not is_offset:
                     continue
     
                 if p_type == 'make':
@@ -1250,39 +1373,48 @@ def get_balance_sheet_raw_data():
                 print(f"Skipped Corrupt Payment Row: {e}")
                 continue
     except: pass
-    try:
-        c.execute("SELECT invoice_date, invoice_number, customer_name, total, balance_due, status FROM invoices WHERE company_id = ? AND is_deleted=0 AND status != 'Draft'", (ACTIVE_COMPANY_ID,))
-        invoices = c.fetchall()
-    except: pass
-    try:
-        c.execute("SELECT purchase_date, bill_number, vendor_name, total, balance_due, status FROM purchases WHERE company_id = ? AND is_deleted=0 AND is_draft=0", (ACTIVE_COMPANY_ID,))
-        purchases = c.fetchall()
-    except: pass
-    try:
-        c.execute("SELECT added_date, item_name, quantity, market_price, transaction_type FROM stock WHERE company_id = ? AND COALESCE(is_deleted, 0) = 0 ORDER BY id ASC", (ACTIVE_COMPANY_ID,))
-        stock = c.fetchall()
-    except: pass
+    
+    # --- THE FIX: Removed Ghost Queries ---
+    # Invoices, Purchases, and Stock are already fetched optimally 
+    # directly inside balance_sheet.py to calculate GST and depreciation.
+    # We no longer load thousands of rows into RAM twice!
+    # ------------------------------------
+    
     conn.close()
-    return {"salaries": salaries, "expenses": expenses, "invoices": invoices, "stock": stock, "purchases": purchases}
+    return {"salaries": salaries, "expenses": expenses}
+
+GLOBAL_UI_KEYS = ("dark_mode", "admin_sec_q", "admin_sec_a")
 
 def save_ui_setting(key, value):
     conn = get_connection(); cursor = conn.cursor()
-    target_cid = 0 if key == "dark_mode" else ACTIVE_COMPANY_ID
-    # --- THE FIX: Enforce absolute Company Isolation for all UI keys! ---
-    safe_key = key if key == "dark_mode" or str(target_cid) in key else f"{key}_cid_{target_cid}"
+    is_global = key in GLOBAL_UI_KEYS
+    target_cid = 0 if is_global else ACTIVE_COMPANY_ID
+    
+    # --- THE FIX: Rock-Solid Company Isolation (Strips legacy suffixes and enforces active CID) ---
+    import re
+    clean_key = re.sub(r'(_cid_\d+|_\d+)$', '', key)
+    safe_key = key if is_global else f"{clean_key}_cid_{target_cid}"
+    
     cursor.execute("REPLACE INTO ui_settings (setting_key, setting_value, company_id) VALUES (?, ?, ?)", (safe_key, value, target_cid))
     conn.commit(); conn.close()
 
 def get_ui_setting(key, default="{}"):
     conn = get_connection(); cursor = conn.cursor()
-    target_cid = 0 if key == "dark_mode" else ACTIVE_COMPANY_ID
-    safe_key = key if key == "dark_mode" or str(target_cid) in key else f"{key}_cid_{target_cid}"
+    is_global = key in GLOBAL_UI_KEYS
+    target_cid = 0 if is_global else ACTIVE_COMPANY_ID
     
-    cursor.execute("SELECT setting_value FROM ui_settings WHERE setting_key=?", (safe_key,))
+    import re
+    clean_key = re.sub(r'(_cid_\d+|_\d+)$', '', key)
+    safe_key = key if is_global else f"{clean_key}_cid_{target_cid}"
+    
+    cursor.execute("SELECT setting_value FROM ui_settings WHERE setting_key=? AND company_id=?", (safe_key, target_cid))
     res = cursor.fetchone()
-    if not res and key != "dark_mode": # Fallback for old un-isolated keys
-        cursor.execute("SELECT setting_value FROM ui_settings WHERE setting_key=?", (key,))
+    
+    if not res and not is_global:
+        # Strict fallback: Only read old un-isolated keys if they belong to THIS specific company!
+        cursor.execute("SELECT setting_value FROM ui_settings WHERE setting_key=? AND company_id=?", (clean_key, target_cid))
         res = cursor.fetchone()
+        
     conn.close()
     return res[0] if res else default
 
@@ -1339,6 +1471,11 @@ def restore_general_expense_record(row_data):
     placeholders = ",".join(["?"] * len(cols))
     safe_data = list(row_data[:len(cols)])
     while len(safe_data) < len(cols): safe_data.append(None)
+    
+    # --- THE FIX: Block the Cross-Company Backup Leak ---
+    if "company_id" in cols: safe_data[cols.index("company_id")] = ACTIVE_COMPANY_ID
+    # ----------------------------------------------------
+    
     cursor.execute(f"INSERT INTO general_expenses ({','.join(cols)}) VALUES ({placeholders})", safe_data)
     conn.commit(); conn.close()
 
@@ -1357,8 +1494,8 @@ def get_distinct_expense_titles():
 
 def get_pl_vendor_payments():
     conn = get_connection(); cursor = conn.cursor()
-    # --- THE FIX: Quarantine TDS Deductions from P&L calculations ---
-    cursor.execute("SELECT pay_date, party_name, amount, notes, mode FROM party_payments WHERE company_id = ? AND pay_type = 'make' AND mode NOT IN ('Write-Off', 'Adjustment', 'System Adjustment', 'TDS Deduction') AND LOWER(COALESCE(notes, '')) NOT LIKE '%advance%' AND LOWER(COALESCE(ref, '')) NOT LIKE '%advance%' AND EXISTS (SELECT 1 FROM customers WHERE customers.id = party_payments.party_id AND customers.company_id = party_payments.company_id)", (ACTIVE_COMPANY_ID,))
+    # --- THE FIX: Quarantine TDS Deductions & Contra Offsets from P&L calculations ---
+    cursor.execute("SELECT pay_date, party_name, amount, notes, mode FROM party_payments WHERE company_id = ? AND pay_type = 'make' AND mode NOT IN ('Write-Off', 'Adjustment', 'System Adjustment', 'TDS Deduction', 'Contra / Bill Offset') AND LOWER(COALESCE(notes, '')) NOT LIKE '%advance%' AND LOWER(COALESCE(ref, '')) NOT LIKE '%advance%' AND EXISTS (SELECT 1 FROM customers WHERE customers.id = party_payments.party_id AND customers.company_id = party_payments.company_id)", (ACTIVE_COMPANY_ID,))
     # --------------------------------------------------------------------
     rows = cursor.fetchall(); conn.close()
     return rows
@@ -1378,7 +1515,9 @@ def get_employee_dict(emp_id):
     conn = get_connection(); cursor = conn.cursor()
     cursor.execute("SELECT id, company_id, name, phone, alt_phone, role, salary, join_date, photo_path, document_path, dob, docs_json, resign_date, rejoin_date, salary_history, is_pinned FROM employees WHERE id=? AND company_id=?", (emp_id, ACTIVE_COMPANY_ID))
     row = cursor.fetchone()
-    if not row: return None
+    if not row:
+        conn.close()
+        return None
     cols = ["id", "company_id", "name", "phone", "alt_phone", "role", "salary", "join_date", "photo_path", "document_path", "dob", "docs_json", "resign_date", "rejoin_date", "salary_history", "is_pinned"]
     conn.close()
     return dict(zip(cols, row))
@@ -1455,7 +1594,10 @@ def restore_employee_record_full(row_data):
     # --- THE FIX: Dynamically pad or trim the snapshot to match the modern schema! ---
     safe_data = list(row_data[:len(cols)])
     while len(safe_data) < len(cols): safe_data.append(None)
-    # ---------------------------------------------------------------------------------
+    
+    # --- THE FIX: Block the Cross-Company Backup Leak ---
+    if "company_id" in cols: safe_data[cols.index("company_id")] = ACTIVE_COMPANY_ID
+    # ----------------------------------------------------
     
     placeholders = ",".join(["?"] * len(cols))
     c.execute(f"INSERT INTO employees ({','.join(cols)}) VALUES ({placeholders})", safe_data)
@@ -1469,7 +1611,10 @@ def update_employee_record_full(row_data):
     # --- THE FIX: Dynamically pad or trim the snapshot to match the modern schema! ---
     safe_data = list(row_data[:len(cols)])
     while len(safe_data) < len(cols): safe_data.append(None)
-    # ---------------------------------------------------------------------------------
+    
+    # --- THE FIX: Block the Cross-Company Backup Leak ---
+    if "company_id" in cols: safe_data[cols.index("company_id")] = ACTIVE_COMPANY_ID
+    # ----------------------------------------------------
     
     set_clause = ", ".join([f"{col}=?" for col in cols])
     params = safe_data + [safe_data[0]]
@@ -1518,7 +1663,7 @@ def mark_employee_status(emp_id, status, status_date):
     conn = get_connection(); c = conn.cursor()
     if status == "Resigned": c.execute("UPDATE employees SET resign_date=?, rejoin_date='' WHERE id=? AND company_id=?", (status_date, emp_id, ACTIVE_COMPANY_ID))
     else: c.execute("UPDATE employees SET rejoin_date=? WHERE id=? AND company_id=?", (status_date, emp_id, ACTIVE_COMPANY_ID))
-    c.execute("INSERT INTO employee_payments (emp_id, pay_type, amount, pay_date, notes) VALUES (?, ?, 0.0, ?, ?)", (emp_id, status, status_date, f"Status changed to {status}"))
+    c.execute("INSERT INTO employee_payments (emp_id, pay_type, amount, pay_date, notes, company_id) VALUES (?, ?, 0.0, ?, ?, ?)", (emp_id, status, status_date, f"Status changed to {status}", ACTIVE_COMPANY_ID))
     conn.commit(); conn.close()
 
 def sync_employee_status(emp_id):
@@ -1628,8 +1773,9 @@ def delete_party_payment(pay_id, company_id, bypass_rules=False, is_twin_deletio
             if not (u_row and u_row[3] == "Admin"):
                 perms = get_user_permissions(uid)
                 inv_rules = perms.get("invoice_rules", {}) if isinstance(perms.get("invoice_rules"), dict) else {}
+                purch_rules = perms.get("purchase_rules", {}) if isinstance(perms.get("purchase_rules"), dict) else {}
                 party_rules = perms.get("party_rules", {}) if isinstance(perms.get("party_rules"), dict) else {}
-                if inv_rules.get("lock_past_payments", False) or party_rules.get("lock_past_payments", False):
+                if inv_rules.get("lock_past_payments", False) or purch_rules.get("lock_past_payments", False) or party_rules.get("lock_past_payments", False):
                     today_date = datetime.datetime.now().date()
                     pay_dt = None
                     raw_pdate = str(p_date or "").strip()[:10]
@@ -1684,90 +1830,124 @@ def delete_party_payment(pay_id, company_id, bypass_rules=False, is_twin_deletio
                 
             cursor.execute("UPDATE customers SET address=? WHERE id=?", (json.dumps(j_data), c_id))
 
+    def _parse_ref_num(raw_s):
+        if not raw_s: return 0.0
+        s = re.sub(r'[^\d\.,]', '', str(raw_s)).strip()
+        if not s: return 0.0
+        if "," in s and "." in s:
+            if s.rfind(",") > s.rfind("."):
+                s = s.replace(".", "").replace(",", ".")
+            else:
+                s = s.replace(",", "")
+        elif "," in s:
+            parts_c = s.split(",")
+            if len(parts_c) == 2 and len(parts_c[1]) <= 2:
+                s = s.replace(",", ".")
+            else:
+                s = s.replace(",", "")
+        try: return float(s)
+        except: return 0.0
+
     parts = p_ref.split(" | ")
     for part in parts:
         if "Advance Wallet" in part or "Refunded" in part: continue
         
         bill_no = part.split(" (")[0].strip()
         import re
-        amt_match = re.search(r'\((.*?)\)', part)
-        if amt_match:
-            raw_val = re.sub(r'[^\d\.]', '', amt_match.group(1))
-            try: bill_amt = float(raw_val)
-            except: continue
-            is_woff = ("Write-Off" in p_mode or "Write-Off" in part)
+        
+        all_amts = re.findall(r'\((.*?)\)', part)
+        if not all_amts: continue
+        
+        cash_amt = _parse_ref_num(all_amts[0])
+        
+        woff_amt = 0.0
+        if "Write-Off" in part and len(all_amts) > 1:
+            woff_amt = _parse_ref_num(all_amts[1])
+        elif "Write-Off" in p_mode:
+            woff_amt = cash_amt
+            cash_amt = 0.0
 
-            if p_type == 'receive':
-                cursor.execute("SELECT id, amount_paid, total, write_off, place_of_service FROM invoices WHERE invoice_number=? AND customer_name=? AND company_id=? AND is_deleted=0", (bill_no, p_party, company_id))
-                b_row = cursor.fetchone()
-                if b_row:
-                    b_id, b_paid, b_tot, b_woff, b_place = b_row
-                    b_paid, b_tot, b_woff = float(b_paid or 0.0), float(b_tot or 0.0), float(b_woff or 0.0)
-                    
-                    if p_mode in ("System Reversal", "System Adjustment"):
-                        new_tot = b_tot + bill_amt
-                        new_woff = b_woff
-                        new_paid = b_paid
-                    elif is_woff:
-                        new_woff = max(0.0, b_woff - bill_amt)
-                        new_paid = b_paid
-                        new_tot = b_tot
-                    else:
-                        new_paid = max(0.0, b_paid - bill_amt)
-                        new_woff = b_woff
-                        new_tot = b_tot
-                        
-                    new_bal = max(0.0, new_tot - new_paid - new_woff)
-                    new_stat = 'Paid' if new_bal <= 0.01 else ('Partial' if new_paid > 0 or new_woff > 0 else 'Unpaid')
-                    
-                    # --- THE FIX: Bulletproof Math-Based Ghost Eradication[cite: 5] ---
-                    import re
-                    adv_match = re.search(r'@@ADV@@1\|\|([\d\.]+)', str(b_place))
-                    if adv_match:
-                        adv_val = float(adv_match.group(1) or 0.0)
-                        # If the deleted payment matches the advance exactly, OR the invoice is now empty, scrub it!
-                        if abs(bill_amt - adv_val) < 0.01 or new_paid < adv_val:
-                            b_place = re.sub(r'@@ADV@@1\|\|[\d\.]+', '@@ADV@@0||', str(b_place))
-                    # -------------------------------------------------------------------
-                    
-                    cursor.execute("UPDATE invoices SET amount_paid=?, balance_due=?, status=?, write_off=?, total=?, place_of_service=? WHERE id=?", (new_paid, new_bal, new_stat, new_woff, new_tot, b_place, b_id))
+        # --- THE FIX: Restore Opening Balance when an OB payment is deleted ---
+        if bill_no == "Opening Balance":
+            if p_party_id:
+                cursor.execute("SELECT id, address FROM customers WHERE id=? AND company_id=?", (p_party_id, company_id))
             else:
-                if p_party_id and str(p_party_id).isdigit():
-                    cursor.execute("SELECT id, amount_paid, total, write_off FROM purchases WHERE bill_number=? AND (vendor_id=? OR (vendor_id IS NULL AND vendor_name=?)) AND company_id=? AND is_deleted=0", (bill_no, int(p_party_id), p_party, company_id))
+                cursor.execute("SELECT id, address FROM customers WHERE name=? AND company_id=?", (p_party, company_id))
+            ob_row = cursor.fetchone()
+            if ob_row and ob_row[1]:
+                try:
+                    j_ob = json.loads(ob_row[1])
+                    curr_ob_paid = float(j_ob.get("ob_paid", 0.0) or 0.0)
+                    j_ob["ob_paid"] = max(0.0, curr_ob_paid - (cash_amt + woff_amt))
+                    cursor.execute("UPDATE customers SET address=? WHERE id=?", (json.dumps(j_ob), ob_row[0]))
+                except Exception:
+                    pass
+            continue
+        # ----------------------------------------------------------------------
+
+        if p_type == 'receive':
+            cursor.execute("SELECT id, amount_paid, total, write_off, place_of_service FROM invoices WHERE invoice_number=? AND customer_name=? AND company_id=? AND is_deleted=0", (bill_no, p_party, company_id))
+            b_row = cursor.fetchone()
+            if b_row:
+                b_id, b_paid, b_tot, b_woff, b_place = b_row
+                b_paid, b_tot, b_woff = float(b_paid or 0.0), float(b_tot or 0.0), float(b_woff or 0.0)
+                
+                if p_mode in ("System Reversal", "System Adjustment"):
+                    new_tot = b_tot + cash_amt
+                    new_woff = b_woff
+                    new_paid = b_paid
                 else:
-                    cursor.execute("SELECT id, amount_paid, total, write_off FROM purchases WHERE bill_number=? AND vendor_name=? AND company_id=? AND is_deleted=0", (bill_no, p_party, company_id))
-                b_row = cursor.fetchone()
-                if b_row:
-                    b_id, b_paid, b_tot, b_woff = b_row
-                    b_paid, b_tot, b_woff = float(b_paid or 0.0), float(b_tot or 0.0), float(b_woff or 0.0)
+                    new_paid = max(0.0, b_paid - cash_amt)
+                    new_woff = max(0.0, b_woff - woff_amt)
+                    new_tot = b_tot
                     
-                    if p_mode in ("System Reversal", "System Adjustment"):
-                        new_tot = b_tot + bill_amt
-                        new_woff = b_woff
-                        new_paid = b_paid
-                    elif is_woff:
-                        new_woff = max(0.0, b_woff - bill_amt)
-                        new_paid = b_paid
-                        new_tot = b_tot
-                    else:
-                        new_paid = max(0.0, b_paid - bill_amt)
-                        new_woff = b_woff
-                        new_tot = b_tot
-                        
-                    new_bal = max(0.0, new_tot - new_paid - new_woff)
-                    new_stat = 'Paid' if new_bal <= 0.01 else ('Partial' if new_paid > 0 or new_woff > 0 else 'Unpaid')
-                    cursor.execute("UPDATE purchases SET amount_paid=?, balance_due=?, status=?, write_off=?, total=? WHERE id=?", (new_paid, new_bal, new_stat, new_woff, new_tot, b_id))
+                new_bal = max(0.0, new_tot - new_paid - new_woff)
+                new_stat = 'Paid' if new_bal <= 0.01 else ('Partial' if new_paid > 0 or new_woff > 0 else 'Unpaid')
+                
+                adv_match = re.search(r'@@ADV@@1\|\|([\d\.]+)', str(b_place))
+                if adv_match:
+                    adv_val = float(adv_match.group(1) or 0.0)
+                    if abs(cash_amt - adv_val) < 0.01 or new_paid < adv_val:
+                        b_place = re.sub(r'@@ADV@@1\|\|[\d\.]+', '@@ADV@@0||', str(b_place))
+                
+                cursor.execute("UPDATE invoices SET amount_paid=?, balance_due=?, status=?, write_off=?, total=?, place_of_service=? WHERE id=?", (new_paid, new_bal, new_stat, new_woff, new_tot, b_place, b_id))
+        else:
+            if p_party_id and str(p_party_id).isdigit():
+                cursor.execute("SELECT id, amount_paid, total, write_off FROM purchases WHERE bill_number=? AND (vendor_id=? OR (vendor_id IS NULL AND vendor_name=?)) AND company_id=? AND is_deleted=0", (bill_no, int(p_party_id), p_party, company_id))
+            else:
+                cursor.execute("SELECT id, amount_paid, total, write_off FROM purchases WHERE bill_number=? AND vendor_name=? AND company_id=? AND is_deleted=0", (bill_no, p_party, company_id))
+            b_row = cursor.fetchone()
+            if b_row:
+                b_id, b_paid, b_tot, b_woff = b_row
+                b_paid, b_tot, b_woff = float(b_paid or 0.0), float(b_tot or 0.0), float(b_woff or 0.0)
+                
+                if p_mode in ("System Reversal", "System Adjustment"):
+                    new_tot = b_tot + cash_amt
+                    new_woff = b_woff
+                    new_paid = b_paid
+                else:
+                    new_paid = max(0.0, b_paid - cash_amt)
+                    new_woff = max(0.0, b_woff - woff_amt)
+                    new_tot = b_tot
+                    
+                new_bal = max(0.0, new_tot - new_paid - new_woff)
+                new_stat = 'Paid' if new_bal <= 0.01 else ('Partial' if new_paid > 0 or new_woff > 0 else 'Unpaid')
+                cursor.execute("UPDATE purchases SET amount_paid=?, balance_due=?, status=?, write_off=?, total=? WHERE id=?", (new_paid, new_bal, new_stat, new_woff, new_tot, b_id))
 
-    if p_mode in ("System Reversal", "System Adjustment"):
-        extracted_bill = p_ref.split(" | ")[-1].split(" (")[0].strip()
-        cursor.execute("DELETE FROM general_expenses WHERE company_id=? AND notes LIKE ?", (company_id, f'%{extracted_bill}%'))
-
-    # --- THE FIX: Find the Twin ID before deleting this one! ---
+    # --- THE FIX: Cross-Module Deletion Bleed Patched ---
+    # Instantly hunts down and vaporizes linked TDS and Write-Off ghosts!
     twin_ids = []
-    if not is_twin_deletion and p_mode == "Contra / Bill Offset":
-        cursor.execute("SELECT id FROM party_payments WHERE company_id=? AND party_id=? AND mode=? AND pay_date=? AND id != ?", (company_id, p_party_id, p_mode, p_date, pay_id))
-        twin_ids = [r[0] for r in cursor.fetchall()]
-    # -----------------------------------------------------------
+    if not is_twin_deletion:
+        if p_mode == "Contra / Bill Offset":
+            cursor.execute("SELECT id FROM party_payments WHERE company_id=? AND party_id=? AND mode=? AND pay_date=? AND id != ?", (company_id, p_party_id, p_mode, p_date, pay_id))
+            twin_ids = [r[0] for r in cursor.fetchall()]
+        else:
+            for part in parts:
+                bill_no = part.split(" (")[0].strip()
+                if bill_no and bill_no != "Advance Wallet" and bill_no != "Refunded":
+                    cursor.execute("SELECT id FROM party_payments WHERE company_id=? AND party_id=? AND pay_date=? AND mode IN ('TDS Deduction', 'Write-Off') AND ref LIKE ? AND id != ?", (company_id, p_party_id, p_date, f"%{bill_no} (%", pay_id))
+                    twin_ids.extend([r[0] for r in cursor.fetchall()])
+    # ----------------------------------------------------
 
     cursor.execute("DELETE FROM party_payments WHERE id=? AND company_id=?", (pay_id, company_id))
     conn.commit()
@@ -2107,6 +2287,31 @@ def auto_heal_file_paths():
             except: pass
     except: pass
 
+    # 6. Company Template JSON (Bank QR codes & Digital Signatures)
+    try:
+        c.execute("SELECT id, template_json FROM company WHERE template_json IS NOT NULL AND template_json != ''")
+        for comp_id_r, t_str in c.fetchall():
+            try:
+                t_data = json.loads(t_str)
+                if not isinstance(t_data, dict): continue
+                updated_t = False
+                for b_obj in t_data.get("banks", []):
+                    if isinstance(b_obj, dict) and b_obj.get("qr_path"):
+                        new_qr = fix_path(b_obj["qr_path"])
+                        if new_qr != b_obj["qr_path"]:
+                            b_obj["qr_path"] = new_qr
+                            updated_t = True
+                for s_obj in t_data.get("signatures", []):
+                    if isinstance(s_obj, dict) and s_obj.get("path"):
+                        new_sig = fix_path(s_obj["path"])
+                        if new_sig != s_obj["path"]:
+                            s_obj["path"] = new_sig
+                            updated_t = True
+                if updated_t:
+                    c.execute("UPDATE company SET template_json=? WHERE id=?", (json.dumps(t_data), comp_id_r))
+            except: pass
+    except: pass
+
     conn.commit()
     conn.close()
 
@@ -2423,13 +2628,17 @@ def check_invoice_permission(inv_id, action="edit", company_id=None, user_id=Non
     c = conn.cursor()
     _ensure_audit_table(conn, c)
 
-    c.execute("SELECT invoice_number, invoice_date, status FROM invoices WHERE id=? AND company_id=?", (inv_id, cid))
+    c.execute("SELECT invoice_number, invoice_date, status, ca_submitted FROM invoices WHERE id=? AND company_id=?", (inv_id, cid))
     inv_row = c.fetchone()
     if not inv_row:
         conn.close()
         return True, ""
 
     inv_num, inv_date, status = str(inv_row[0] or "").strip(), str(inv_row[1] or "").strip(), str(inv_row[2] or "")
+    
+    if inv_row[3] == 1:
+        conn.close()
+        return False, "This invoice is marked as 'GST Filed'.\n\nTo prevent compliance mismatch, modifications are locked."
     # Drafts are not finalized bills yet, so allow editing/posting them freely
     if status == "Draft":
         conn.close()
